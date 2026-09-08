@@ -9,14 +9,7 @@ Registration row, and show them their ticket code.
 """
 
 import streamlit as st
-from utils.db import (
-    init_db,
-    get_all_events,
-    get_guest_by_email,
-    add_guest,
-    add_registration,
-    find_possible_duplicate,
-)
+from utils.db import init_db, get_all_events, get_or_create_guest, add_registration
 
 init_db()
 
@@ -46,30 +39,11 @@ with st.form("register_form"):
         else:
             event_id = event_options[selected_label]
 
-            # If this email is already a known guest, reuse that guest_id
-            # instead of creating a duplicate row in the guests table.
-            existing = get_guest_by_email(email.strip())
-            if existing:
-                guest_id = existing["guest_id"]
-            else:
-                # No exact email match. Check whether the name is a close
-                # match to someone already in the system -- a typo, a
-                # nickname, or the same person using a different email.
-                # Either way, registration still goes through as normal;
-                # we just flag the new guest row so it shows up on the
-                # admin page for a human to review later. The guest sees
-                # nothing different either way.
-                possible_match = find_possible_duplicate(name.strip())
-                if possible_match:
-                    guest_id = add_guest(
-                        name.strip(),
-                        email.strip(),
-                        phone.strip(),
-                        possible_duplicate_of=possible_match["guest_id"],
-                        duplicate_match_score=possible_match["score"],
-                    )
-                else:
-                    guest_id = add_guest(name.strip(), email.strip(), phone.strip())
+            # Handles the exact-email-match reuse and the fuzzy-name
+            # duplicate flagging in one place -- see get_or_create_guest()
+            # in utils/db.py for the actual logic. The guest sees nothing
+            # different regardless of which path it takes.
+            guest_id = get_or_create_guest(name.strip(), email.strip(), phone.strip())
 
             ticket_code = add_registration(guest_id, event_id)
 

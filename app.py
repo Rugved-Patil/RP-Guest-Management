@@ -7,6 +7,7 @@ review_page = st.Page("pages/review.py", title="Leave a Review", icon="💬")
 admin_manage_page = st.Page("pages/admin_manage.py", title="Manage Guests", icon="🗂️")
 admin_attendance_page = st.Page("pages/admin_attendance.py", title="Check-In", icon="🎟️")
 admin_analytics_page = st.Page("pages/admin_analytics.py", title="Analytics", icon="📊")
+admin_tools_page = st.Page("pages/admin_tools.py", title="Data Tools", icon="🧹")
 
 # Build the sidebar menu from those pages
 pg = st.navigation([
@@ -16,6 +17,7 @@ pg = st.navigation([
     admin_manage_page,
     admin_attendance_page,
     admin_analytics_page,
+    admin_tools_page,
 ])
 
 # Actually run whichever page is selected

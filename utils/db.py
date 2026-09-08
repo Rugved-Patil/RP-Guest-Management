@@ -15,7 +15,7 @@ if the schema changes later, there's only one place to update.
 import sqlite3
 import random
 import string
-from datetime import datetime
+from datetime import datetime, date, timedelta, time as dtime
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -335,6 +335,34 @@ def find_possible_duplicate(name, exclude_guest_id=None, threshold=DUPLICATE_MAT
     return None
 
 
+def get_or_create_guest(name, email, phone):
+    """
+    The full "find this guest, or create them" logic in one place:
+    exact email match wins first; failing that, a fuzzy name match
+    flags the new guest as a possible duplicate; failing that, it's
+    just a normal new guest.
+
+    This is exactly what register.py needs, and it's also what the
+    sample-data seeder needs (see seed_sample_data() below) -- pulling
+    it out here means both call one function instead of the same
+    three-way logic being copy-pasted in two places.
+
+    Returns the resulting guest_id either way.
+    """
+    existing = get_guest_by_email(email)
+    if existing:
+        return existing["guest_id"]
+
+    possible_match = find_possible_duplicate(name)
+    if possible_match:
+        return add_guest(
+            name, email, phone,
+            possible_duplicate_of=possible_match["guest_id"],
+            duplicate_match_score=possible_match["score"],
+        )
+    return add_guest(name, email, phone)
+
+
 # ---------------------------------------------------------------------
 # Registrations
 # ---------------------------------------------------------------------
@@ -353,10 +381,16 @@ def _ticket_code_exists(cur, code):
     return cur.fetchone() is not None
 
 
-def add_registration(guest_id, event_id):
+def add_registration(guest_id, event_id, attendance_status="registered",
+                      checked_in_at=None, registered_at=None):
     """
     Register a guest for an event: generates a unique ticket code,
     stores the registration, and returns the ticket code to show them.
+
+    attendance_status / checked_in_at / registered_at are optional and
+    only matter for the sample-data seeder below -- a real guest
+    registering through the form always gets the defaults (registered
+    now, not checked in yet), so register.py doesn't need to change.
     """
     conn = get_connection()
     cur = conn.cursor()
@@ -368,16 +402,276 @@ def add_registration(guest_id, event_id):
     while _ticket_code_exists(cur, code):
         code = _generate_ticket_code()
 
-    registered_at = datetime.now().isoformat(timespec="seconds")
+    if registered_at is None:
+        registered_at = datetime.now().isoformat(timespec="seconds")
 
     cur.execute(
         """
         INSERT INTO registrations
-            (guest_id, event_id, registered_at, ticket_code, attendance_status)
-        VALUES (?, ?, ?, ?, 'registered')
+            (guest_id, event_id, registered_at, ticket_code, attendance_status, checked_in_at)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (guest_id, event_id, registered_at, code),
+        (guest_id, event_id, registered_at, code, attendance_status, checked_in_at),
     )
     conn.commit()
     conn.close()
     return code
+
+
+# ---------------------------------------------------------------------
+# Reviews
+# ---------------------------------------------------------------------
+
+def add_review(guest_id, event_id, review_text, sentiment_score=None):
+    """
+    Insert a review left by a guest for an event they attended.
+
+    sentiment_score is optional -- leave it as None for a real guest
+    review, since scoring it is the review page's job (a separate,
+    not-yet-built step that runs the text through VADER or similar).
+    The sample-data seeder below passes an approximate score directly
+    so the analytics page has something to chart before that's built.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO reviews (guest_id, event_id, review_text, sentiment_score)
+        VALUES (?, ?, ?, ?)
+        """,
+        (guest_id, event_id, review_text, sentiment_score),
+    )
+    conn.commit()
+    review_id = cur.lastrowid
+    conn.close()
+    return review_id
+
+
+# ---------------------------------------------------------------------
+# Admin data tools (reset + sample data)
+# ---------------------------------------------------------------------
+
+def get_table_counts():
+    """
+    Return the number of rows in each table, e.g.
+    {"guests": 30, "events": 15, "registrations": 210, "reviews": 74}.
+    Used by the Data Tools page so you can see what's there before
+    resetting it, and confirm what got added after seeding.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    counts = {}
+    for table in ("guests", "events", "registrations", "reviews"):
+        cur.execute(f"SELECT COUNT(*) FROM {table}")
+        counts[table] = cur.fetchone()[0]
+    conn.close()
+    return counts
+
+
+def reset_all_data():
+    """
+    The "kill switch": delete every row from all four tables and reset
+    SQLite's auto-increment counters, so the next guest/event created
+    after this starts back at ID 1 instead of continuing from wherever
+    the old data left off. Irreversible -- the page calling this is
+    responsible for getting the admin to confirm first.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    # Order doesn't strictly matter here since we're clearing every
+    # table, but deleting registrations/reviews (which point at guests
+    # and events) before guests/events keeps foreign_keys=ON happy at
+    # every step instead of only at the end.
+    cur.execute("DELETE FROM reviews")
+    cur.execute("DELETE FROM registrations")
+    cur.execute("DELETE FROM guests")
+    cur.execute("DELETE FROM events")
+    # sqlite_sequence is SQLite's internal "next AUTOINCREMENT value"
+    # tracker, one row per table. Clearing it means new rows start
+    # back at 1 instead of picking up from the highest ID ever used.
+    cur.execute("DELETE FROM sqlite_sequence")
+    conn.commit()
+    conn.close()
+
+
+# --- sample data building blocks -------------------------------------
+
+_EVENT_NAMES_BY_TAG = {
+    "Movie": ["Movie Premiere Night", "Classic Film Screening",
+              "Indie Cinema Showcase", "Late Night Movie Marathon"],
+    "Play": ["Broadway Night", "Community Theatre Play",
+             "Shakespeare in the Park", "One-Act Play Festival"],
+    "Sports": ["City Marathon", "Local Cricket Match",
+               "Basketball Tournament", "Charity Football Cup"],
+    "Dance": ["Salsa Night", "Contemporary Dance Recital",
+              "Hip-Hop Showcase", "Ballroom Dance Gala"],
+}
+
+_FIRST_NAMES = ["Aarav", "Vivaan", "Aditya", "Vihaan", "Arjun", "Sai",
+                "Reyansh", "Ayaan", "Ishaan", "Kabir", "Ananya", "Diya",
+                "Saanvi", "Aadhya", "Kiara", "Myra", "Pari", "Anika",
+                "Navya", "Riya"]
+_LAST_NAMES = ["Sharma", "Verma", "Gupta", "Patil", "Reddy", "Nair",
+               "Iyer", "Singh", "Rao", "Deshmukh", "Kulkarni", "Joshi",
+               "Mehta", "Kapoor"]
+
+_REVIEWS_POSITIVE = [
+    ("Amazing event, loved every moment of it!", 0.85),
+    ("Really well organized and so much fun.", 0.75),
+    ("One of the best events I've been to this year.", 0.80),
+    ("Great vibe, great people, would definitely come again.", 0.78),
+    ("Everything ran smoothly, had a wonderful time.", 0.70),
+]
+_REVIEWS_NEUTRAL = [
+    ("It was okay, nothing special but not bad either.", 0.05),
+    ("Decent event, could have been better organized.", -0.05),
+    ("Average experience overall.", 0.0),
+]
+_REVIEWS_NEGATIVE = [
+    ("Quite disappointing, expected a lot more.", -0.60),
+    ("Poorly organized, long wait times and confusion.", -0.75),
+    ("Not worth it, wouldn't recommend.", -0.70),
+]
+
+
+def _pick_review():
+    """Pick one (text, sentiment_score) pair, weighted toward positive --
+    most real post-event reviews skew positive, since happy attendees
+    are more likely to bother leaving one at all."""
+    bucket = random.choices(
+        [_REVIEWS_POSITIVE, _REVIEWS_NEUTRAL, _REVIEWS_NEGATIVE],
+        weights=[0.55, 0.25, 0.20],
+        k=1,
+    )[0]
+    return random.choice(bucket)
+
+
+def _make_similar_name(name):
+    """
+    Build a "near-duplicate" of a name -- either the words reordered
+    or one letter changed -- so the sample data includes a few guests
+    that find_possible_duplicate() should actually catch. Makes the
+    Data Tools output more useful as a demo of that feature too.
+    """
+    if random.random() < 0.5 and " " in name:
+        words = name.split()
+        random.shuffle(words)
+        return " ".join(words)
+    chars = list(name)
+    idx = random.randrange(len(chars))
+    if chars[idx].isalpha():
+        chars[idx] = random.choice(string.ascii_lowercase)
+    return "".join(chars)
+
+
+def seed_sample_data():
+    """
+    Populate the database with a realistic-looking demo dataset:
+    10-20 events spread across the past and future, a pool of guests
+    registered across them, a believable mix of attended/no-show
+    outcomes for past events, and reviews (with sentiment scores) from
+    some of the guests who attended.
+
+    Safe to call more than once -- it adds on top of whatever's
+    already there rather than replacing it. Use reset_all_data() first
+    if you want a clean slate before seeding.
+
+    Returns a dict of how many rows of each kind were added, e.g.
+    {"events": 15, "guests": 32, "registrations": 187, "reviews": 71}.
+    """
+    added = {"events": 0, "guests": 0, "registrations": 0, "reviews": 0}
+
+    # --- Events: spread from 6 months ago to 2 months from now, so
+    # there's a healthy mix of past events (needed later for no-show
+    # prediction and forecasting, which train on history) and future
+    # ones (needed to demo "upcoming event" views). ---
+    today = date.today()
+    window_start = today - timedelta(days=180)
+    window_end = today + timedelta(days=60)
+    window_days = (window_end - window_start).days
+
+    num_events = random.randint(10, 20)
+    events = []  # list of (event_id, event_date, is_past)
+
+    for _ in range(num_events):
+        tag = random.choice(list(_EVENT_NAMES_BY_TAG.keys()))
+        name = random.choice(_EVENT_NAMES_BY_TAG[tag])
+        event_date = window_start + timedelta(days=random.randint(0, window_days))
+        start_hour = random.randint(10, 20)
+        start_minute = random.choice([0, 15, 30, 45])
+        start_time = f"{start_hour:02d}:{start_minute:02d}"
+        end_hour = min(start_hour + random.randint(1, 3), 23)
+        end_time = f"{end_hour:02d}:{start_minute:02d}"
+
+        event_id = add_event(name, event_date.isoformat(), start_time, end_time, tag)
+        events.append((event_id, event_date, event_date < today))
+        added["events"] += 1
+
+    # --- Guests: a pool of fresh names, plus a handful of deliberate
+    # near-duplicates so the fuzzy-match flagging has something to
+    # catch in the sample data too. ---
+    num_guests = random.randint(25, 35)
+    guest_ids = []
+    generated_names = []
+
+    for i in range(num_guests):
+        # Every ~8th guest is a near-duplicate of an earlier one instead
+        # of a fresh name, once there's at least one name to riff on.
+        if generated_names and i % 8 == 7:
+            name = _make_similar_name(random.choice(generated_names))
+        else:
+            name = f"{random.choice(_FIRST_NAMES)} {random.choice(_LAST_NAMES)}"
+            generated_names.append(name)
+
+        email = f"{name.lower().replace(' ', '.')}{i}@example.com"
+        phone = f"9{random.randint(100000000, 999999999)}"
+
+        guest_id = get_or_create_guest(name, email, phone)
+        guest_ids.append(guest_id)
+        added["guests"] += 1
+
+    # --- Registrations (+ reviews for attended guests on past events) ---
+    for event_id, event_date, is_past in events:
+        attendee_count = random.randint(max(1, num_guests // 3), int(num_guests * 0.7))
+        attendees = random.sample(guest_ids, k=min(attendee_count, len(guest_ids)))
+
+        for guest_id in attendees:
+            # event_date/registered_date are plain `date` objects (no time
+            # component), so we combine each with a random time-of-day to
+            # get a full datetime before turning it into a stored string.
+            registered_date = event_date - timedelta(days=random.randint(1, 30))
+            registered_at = datetime.combine(
+                registered_date, dtime(random.randint(9, 21), random.choice([0, 15, 30, 45]))
+            ).isoformat(timespec="seconds")
+
+            if is_past:
+                # Realistic show-up rate: ~75% attend, ~25% no-show.
+                if random.random() < 0.75:
+                    status = "attended"
+                    checked_in_at = datetime.combine(
+                        event_date, dtime(random.randint(9, 21), random.choice([0, 15, 30, 45]))
+                    ).isoformat(timespec="seconds")
+                else:
+                    status = "no_show"
+                    checked_in_at = None
+            else:
+                # Event hasn't happened yet -- can't be attended/no-show.
+                status = "registered"
+                checked_in_at = None
+
+            add_registration(
+                guest_id, event_id,
+                attendance_status=status,
+                checked_in_at=checked_in_at,
+                registered_at=registered_at,
+            )
+            added["registrations"] += 1
+
+            # Only attended guests can leave a review, and even then
+            # not everyone bothers -- about half do.
+            if status == "attended" and random.random() < 0.5:
+                text, score = _pick_review()
+                add_review(guest_id, event_id, text, score)
+                added["reviews"] += 1
+
+    return added
