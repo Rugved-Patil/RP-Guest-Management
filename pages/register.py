@@ -9,7 +9,14 @@ Registration row, and show them their ticket code.
 """
 
 import streamlit as st
-from utils.db import init_db, get_all_events, get_guest_by_email, add_guest, add_registration
+from utils.db import (
+    init_db,
+    get_all_events,
+    get_guest_by_email,
+    add_guest,
+    add_registration,
+    find_possible_duplicate,
+)
 
 init_db()
 
@@ -33,9 +40,7 @@ with st.form("register_form"):
     submitted = st.form_submit_button("Register")
 
     if submitted:
-        # Basic required-field checks. Real duplicate detection (fuzzy
-        # matching similar names/emails) is a separate step we'll add
-        # after this form is working end to end.
+        # Basic required-field checks.
         if not name.strip() or not email.strip():
             st.error("Name and email are required.")
         else:
@@ -47,7 +52,24 @@ with st.form("register_form"):
             if existing:
                 guest_id = existing["guest_id"]
             else:
-                guest_id = add_guest(name.strip(), email.strip(), phone.strip())
+                # No exact email match. Check whether the name is a close
+                # match to someone already in the system -- a typo, a
+                # nickname, or the same person using a different email.
+                # Either way, registration still goes through as normal;
+                # we just flag the new guest row so it shows up on the
+                # admin page for a human to review later. The guest sees
+                # nothing different either way.
+                possible_match = find_possible_duplicate(name.strip())
+                if possible_match:
+                    guest_id = add_guest(
+                        name.strip(),
+                        email.strip(),
+                        phone.strip(),
+                        possible_duplicate_of=possible_match["guest_id"],
+                        duplicate_match_score=possible_match["score"],
+                    )
+                else:
+                    guest_id = add_guest(name.strip(), email.strip(), phone.strip())
 
             ticket_code = add_registration(guest_id, event_id)
 

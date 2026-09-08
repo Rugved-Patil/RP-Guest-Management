@@ -16,7 +16,14 @@ import sqlite3
 import random
 import string
 from datetime import datetime
+from difflib import SequenceMatcher
 from pathlib import Path
+
+# Fuzzy-match threshold for find_possible_duplicate() below, 0-100.
+# Higher = stricter (fewer false alarms, but more real duplicates slip
+# through). Tune this in one place if it's flagging too much or too
+# little once you see it running on real data.
+DUPLICATE_MATCH_THRESHOLD = 85
 
 # The .db file will live in the data/ folder, next to this file's project root.
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "guest_dashboard.db"
@@ -64,6 +71,27 @@ def _ensure_events_columns(conn):
     conn.commit()
 
 
+def _ensure_guests_columns(conn):
+    """
+    Migration helper: if the guests table already existed from before
+    possible_duplicate_of/duplicate_match_score were added (your
+    current .db file does), add the missing columns onto it instead of
+    silently ignoring them. Same idea as _ensure_events_columns above --
+    added as nullable, so existing guest rows just get an empty value
+    (meaning "not flagged"), which is exactly what we want for them.
+    """
+    cur = conn.cursor()
+    cur.execute("PRAGMA table_info(guests)")
+    existing_columns = {row["name"] for row in cur.fetchall()}
+
+    if "possible_duplicate_of" not in existing_columns:
+        cur.execute("ALTER TABLE guests ADD COLUMN possible_duplicate_of INTEGER")
+    if "duplicate_match_score" not in existing_columns:
+        cur.execute("ALTER TABLE guests ADD COLUMN duplicate_match_score REAL")
+
+    conn.commit()
+
+
 def init_db():
     """
     Create all four tables if they don't already exist, and make sure
@@ -78,7 +106,9 @@ def init_db():
             guest_id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             email TEXT NOT NULL,
-            phone TEXT
+            phone TEXT,
+            possible_duplicate_of INTEGER,
+            duplicate_match_score REAL
         )
     """)
 
@@ -122,8 +152,9 @@ def init_db():
 
     conn.commit()
 
-    # Handles the case where events already existed before this update.
+    # Handles the case where events/guests already existed before this update.
     _ensure_events_columns(conn)
+    _ensure_guests_columns(conn)
 
     conn.close()
 
@@ -201,9 +232,9 @@ def delete_event(event_id):
 def get_guest_by_email(email):
     """
     Look up a guest by exact email match.
-    This is a placeholder for now -- real duplicate detection (catching
-    'jon@x.com' vs 'jonathan@x.com' or typos) will be added as a separate
-    fuzzy-matching step later. For now this only catches an exact repeat.
+    This only catches an exact repeat (e.g. the same guest registering
+    twice with the same email). Catching a *different* email or a typo
+    in the name is what find_possible_duplicate(), below, is for.
     """
     conn = get_connection()
     cur = conn.cursor()
@@ -213,18 +244,95 @@ def get_guest_by_email(email):
     return row
 
 
-def add_guest(name, email, phone):
-    """Insert a new guest and return their new guest_id."""
+def add_guest(name, email, phone, possible_duplicate_of=None, duplicate_match_score=None):
+    """
+    Insert a new guest and return their new guest_id.
+
+    possible_duplicate_of / duplicate_match_score are optional. Pass
+    them when find_possible_duplicate() found a likely match, so this
+    new guest row is flagged for the admin to review later. Leave both
+    as None (the default) for a normal, unflagged guest.
+    """
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO guests (name, email, phone) VALUES (?, ?, ?)",
-        (name, email, phone),
+        """
+        INSERT INTO guests (name, email, phone, possible_duplicate_of, duplicate_match_score)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (name, email, phone, possible_duplicate_of, duplicate_match_score),
     )
     conn.commit()
     guest_id = cur.lastrowid
     conn.close()
     return guest_id
+
+
+def _normalize_name_for_matching(name):
+    """
+    Lowercase a name and sort its words alphabetically.
+    This is what lets "Rugved Patil" and "Patil Rugved" still be
+    recognized as the same name even though the words are swapped --
+    comparing the raw strings directly would score that pair as very
+    different, since string comparison cares about order.
+    """
+    words = name.strip().lower().split()
+    return " ".join(sorted(words))
+
+
+def _name_similarity(name_a, name_b):
+    """
+    Return a 0-100 score for how similar two names are (100 = identical
+    after normalizing, 0 = nothing alike).
+
+    Built on difflib, which ships with Python -- no extra install
+    needed. SequenceMatcher.ratio() works by finding the longest
+    stretches of matching characters between two strings, so small
+    typos ("Rugved" vs "Rugved" with one letter swapped) still score
+    high, while genuinely different names score low.
+    """
+    a = _normalize_name_for_matching(name_a)
+    b = _normalize_name_for_matching(name_b)
+    return SequenceMatcher(None, a, b).ratio() * 100
+
+
+def find_possible_duplicate(name, exclude_guest_id=None, threshold=DUPLICATE_MATCH_THRESHOLD):
+    """
+    Fuzzy-check a name against every existing guest's name.
+
+    Returns a dict like {"guest_id": ..., "name": ..., "score": ...}
+    for the closest match, if it scores at or above `threshold`.
+    Returns None if nothing scores high enough.
+
+    exclude_guest_id skips one guest_id while checking -- not used yet,
+    but there so this function can be reused later (e.g. on an "edit
+    guest" screen) without a guest getting flagged as a duplicate of
+    themselves.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT guest_id, name FROM guests")
+    all_guests = cur.fetchall()
+    conn.close()
+
+    best_match = None
+    best_score = 0
+
+    for guest in all_guests:
+        if exclude_guest_id is not None and guest["guest_id"] == exclude_guest_id:
+            continue
+        score = _name_similarity(name, guest["name"])
+        if score > best_score:
+            best_score = score
+            best_match = guest
+
+    if best_match is not None and best_score >= threshold:
+        return {
+            "guest_id": best_match["guest_id"],
+            "name": best_match["name"],
+            "score": round(best_score, 1),
+        }
+    return None
 
 
 # ---------------------------------------------------------------------
