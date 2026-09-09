@@ -11,7 +11,10 @@ Two tools:
 """
 
 import streamlit as st
-from utils.db import init_db, get_table_counts, reset_all_data, seed_sample_data
+from utils.db import (
+    init_db, get_table_counts, reset_all_data, seed_sample_data,
+    get_bypass_setting, set_bypass_setting,
+)
 
 init_db()
 
@@ -84,3 +87,32 @@ else:
         if st.button("Cancel"):
             st.session_state.confirm_reset = False
             st.rerun()
+
+st.divider()
+
+# ---------------------------------------------------------------------
+# Testing settings
+# ---------------------------------------------------------------------
+st.subheader("Testing settings")
+st.write(
+    "admin_attendance.py (check-in) isn't built yet, so there's currently no "
+    "real way for a registration to end up marked 'attended'. Turn this on "
+    "to let the Leave a Review page skip its normal attended + event-over "
+    "check, so you can test the review form end-to-end in the meantime."
+)
+
+# Stored in the database (see get_bypass_setting/set_bypass_setting in
+# db.py) rather than st.session_state, so it stays on even if you test
+# the guest review link in a separate browser tab or window -- session
+# state only lives inside one browser session, but this needs to be
+# visible to a completely different "guest" session too.
+bypass_enabled = st.checkbox(
+    "Bypass review eligibility (testing)",
+    value=get_bypass_setting(),
+)
+set_bypass_setting(bypass_enabled)
+
+if bypass_enabled:
+    st.caption("⚠️ Bypass is ON -- any ticket code can leave a review right now.")
+else:
+    st.caption("Bypass is OFF -- normal attended + event-over rule applies.")

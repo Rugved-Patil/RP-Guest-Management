@@ -71,6 +71,23 @@ def _ensure_events_columns(conn):
     conn.commit()
 
 
+def _ensure_reviews_columns(conn):
+    """
+    Migration helper: if the reviews table already existed before the
+    `rating` column was added (your current .db file does), add it in
+    place -- same pattern as the other _ensure_*_columns helpers above.
+    Nullable, so existing seeded/real reviews just show "no rating".
+    """
+    cur = conn.cursor()
+    cur.execute("PRAGMA table_info(reviews)")
+    existing_columns = {row["name"] for row in cur.fetchall()}
+
+    if "rating" not in existing_columns:
+        cur.execute("ALTER TABLE reviews ADD COLUMN rating INTEGER")
+
+    conn.commit()
+
+
 def _ensure_guests_columns(conn):
     """
     Migration helper: if the guests table already existed from before
@@ -145,16 +162,30 @@ def init_db():
             event_id INTEGER NOT NULL,
             review_text TEXT,
             sentiment_score REAL,
+            rating INTEGER,
             FOREIGN KEY (guest_id) REFERENCES guests (guest_id),
             FOREIGN KEY (event_id) REFERENCES events (event_id)
         )
     """)
 
+    # Simple key/value store for small admin toggles that need to persist
+    # across browser sessions -- e.g. the "bypass review eligibility"
+    # testing switch. st.session_state wouldn't work for this, since it
+    # only lives inside one browser tab, and a guest testing the review
+    # link would be in a different tab/session than the admin who set it.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    """)
+
     conn.commit()
 
-    # Handles the case where events/guests already existed before this update.
+    # Handles the case where events/guests/reviews already existed before this update.
     _ensure_events_columns(conn)
     _ensure_guests_columns(conn)
+    _ensure_reviews_columns(conn)
 
     conn.close()
 
@@ -418,33 +449,150 @@ def add_registration(guest_id, event_id, attendance_status="registered",
     return code
 
 
-# ---------------------------------------------------------------------
-# Reviews
-# ---------------------------------------------------------------------
-
-def add_review(guest_id, event_id, review_text, sentiment_score=None):
+def get_registration_by_ticket(ticket_code):
     """
-    Insert a review left by a guest for an event they attended.
+    Look up a single registration by its ticket code, joined with the
+    guest's name and the event's name/date -- everything review.py
+    needs to identify who's reviewing what, in one query instead of
+    three separate lookups.
 
-    sentiment_score is optional -- leave it as None for a real guest
-    review, since scoring it is the review page's job (a separate,
-    not-yet-built step that runs the text through VADER or similar).
-    The sample-data seeder below passes an approximate score directly
-    so the analytics page has something to chart before that's built.
+    Returns a row with columns: registration_id, guest_id, event_id,
+    ticket_code, attendance_status, checked_in_at, guest_name,
+    event_name, event_date. Returns None if no registration has that
+    ticket code.
     """
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT INTO reviews (guest_id, event_id, review_text, sentiment_score)
-        VALUES (?, ?, ?, ?)
+        SELECT
+            r.registration_id, r.guest_id, r.event_id, r.ticket_code,
+            r.attendance_status, r.checked_in_at,
+            g.name AS guest_name,
+            e.event_name, e.event_date
+        FROM registrations r
+        JOIN guests g ON g.guest_id = r.guest_id
+        JOIN events e ON e.event_id = r.event_id
+        WHERE r.ticket_code = ?
         """,
-        (guest_id, event_id, review_text, sentiment_score),
+        (ticket_code,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+# ---------------------------------------------------------------------
+# Reviews
+# ---------------------------------------------------------------------
+
+def has_review(guest_id, event_id):
+    """True if this guest has already left a review for this event."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT 1 FROM reviews WHERE guest_id = ? AND event_id = ?",
+        (guest_id, event_id),
+    )
+    exists = cur.fetchone() is not None
+    conn.close()
+    return exists
+
+
+def is_review_eligible(registration, bypass=False):
+    """
+    Decide whether the guest on this registration is allowed to leave
+    a review right now.
+
+    Real rule: they were marked "attended" AND the event's date has
+    already passed (not today, not in the future) -- matches the
+    original scope doc ("only guests marked as attended").
+
+    bypass=True skips both checks entirely. Pass the current value of
+    the "Bypass review eligibility (testing)" setting from the Data
+    Tools page here -- it exists because attendance/check-in isn't
+    fully wired up yet (admin_attendance.py is still a stub), so there'd
+    otherwise be no way to test this page end-to-end yet.
+    """
+    if bypass:
+        return True
+    if registration["attendance_status"] != "attended":
+        return False
+    event_date = date.fromisoformat(registration["event_date"])
+    return event_date < date.today()
+
+
+def add_review(guest_id, event_id, review_text, sentiment_score=None, rating=None):
+    """
+    Insert a review left by a guest for an event they attended.
+
+    sentiment_score is optional -- leave it as None for a real guest
+    review, since scoring it is a separate, not-yet-built step that
+    runs the text through VADER or similar. The sample-data seeder
+    below passes an approximate score directly so the analytics page
+    has something to chart before that's built.
+
+    rating is the 1-5 star rating from the review form, also optional
+    so old code that calls add_review() without one still works.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO reviews (guest_id, event_id, review_text, sentiment_score, rating)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (guest_id, event_id, review_text, sentiment_score, rating),
     )
     conn.commit()
     review_id = cur.lastrowid
     conn.close()
     return review_id
+
+
+# ---------------------------------------------------------------------
+# Settings (small admin toggles, stored in the DB so they persist
+# across browser sessions -- unlike st.session_state)
+# ---------------------------------------------------------------------
+
+def get_setting(key, default=None):
+    """Return the stored value for `key`, or `default` if it's not set."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT value FROM settings WHERE key = ?", (key,))
+    row = cur.fetchone()
+    conn.close()
+    return row["value"] if row else default
+
+
+def set_setting(key, value):
+    """
+    Store `value` under `key`, overwriting whatever was there before.
+    "INSERT ... ON CONFLICT DO UPDATE" (an "upsert") means we don't have
+    to check whether the key already exists first -- SQLite handles the
+    insert-or-update in one step.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO settings (key, value) VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        (key, value),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_bypass_setting():
+    """True if the Data Tools 'bypass review eligibility' toggle is on."""
+    return get_setting("bypass_review_eligibility", "0") == "1"
+
+
+def set_bypass_setting(enabled):
+    """Turn the review-eligibility testing bypass on or off."""
+    set_setting("bypass_review_eligibility", "1" if enabled else "0")
 
 
 # ---------------------------------------------------------------------
