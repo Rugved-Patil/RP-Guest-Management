@@ -483,8 +483,80 @@ def get_registration_by_ticket(ticket_code):
 
 
 # ---------------------------------------------------------------------
-# Reviews
+# Attendance / check-in
 # ---------------------------------------------------------------------
+
+def mark_attendance_by_ticket(ticket_code):
+    """
+    Look up a registration by ticket code and, if it isn't already
+    marked "attended", mark it attended and stamp checked_in_at with
+    the current date/time.
+
+    Returns a dict describing what happened, so admin_attendance.py
+    can show the right message without doing its own lookups:
+      {"status": "not_found"}
+      {"status": "already_checked_in", "registration": <row>}
+      {"status": "checked_in", "registration": <row>}
+    "registration" (when present) is a fresh get_registration_by_ticket()
+    row, so the page can show the guest's name, event, and timestamp.
+
+    Note: this doesn't check the event date at all -- unlike reviews,
+    check-in has no "too early" rule here, since you'd normally only be
+    running this page live at the event itself.
+    """
+    registration = get_registration_by_ticket(ticket_code)
+    if registration is None:
+        return {"status": "not_found"}
+
+    if registration["attendance_status"] == "attended":
+        return {"status": "already_checked_in", "registration": registration}
+
+    conn = get_connection()
+    cur = conn.cursor()
+    checked_in_at = datetime.now().isoformat(timespec="seconds")
+    cur.execute(
+        """
+        UPDATE registrations
+        SET attendance_status = 'attended', checked_in_at = ?
+        WHERE registration_id = ?
+        """,
+        (checked_in_at, registration["registration_id"]),
+    )
+    conn.commit()
+    conn.close()
+
+    updated_registration = get_registration_by_ticket(ticket_code)
+    return {"status": "checked_in", "registration": updated_registration}
+
+
+def get_all_registrations_detailed():
+    """
+    Return every registration, joined with the guest's details and the
+    event's details -- one row per registration (a guest with 3
+    registrations appears 3 times), most recently registered first.
+
+    This is what admin_manage.py builds its table from: it has the
+    ticket code and attendance status (which live on the registration)
+    right alongside the guest's name/email/phone and the event's
+    name/date, so nothing needs a second lookup.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT
+            r.registration_id, r.ticket_code, r.attendance_status,
+            r.registered_at, r.checked_in_at,
+            g.guest_id, g.name AS guest_name, g.email, g.phone,
+            g.possible_duplicate_of, g.duplicate_match_score,
+            e.event_id, e.event_name, e.event_date
+        FROM registrations r
+        JOIN guests g ON g.guest_id = r.guest_id
+        JOIN events e ON e.event_id = r.event_id
+        ORDER BY r.registered_at DESC
+    """)
+    rows = cur.fetchall()
+    conn.close()
+    return rows
 
 def has_review(guest_id, event_id):
     """True if this guest has already left a review for this event."""
