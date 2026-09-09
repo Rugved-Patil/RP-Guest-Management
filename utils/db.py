@@ -19,6 +19,11 @@ from datetime import datetime, date, timedelta, time as dtime
 from difflib import SequenceMatcher
 from pathlib import Path
 
+# Used by seed_sample_data() below to give sample reviews real sentiment
+# scores instead of made-up placeholder numbers. See utils/ml.py for why
+# its own heavy imports (transformers) are deferred rather than done here.
+from utils.ml import score_sentiment_batch
+
 # Fuzzy-match threshold for find_possible_duplicate() below, 0-100.
 # Higher = stricter (fewer false alarms, but more real duplicates slip
 # through). Tune this in one place if it's flagging too much or too
@@ -622,6 +627,31 @@ def add_review(guest_id, event_id, review_text, sentiment_score=None, rating=Non
     return review_id
 
 
+def get_all_reviews_detailed():
+    """
+    Return every review, joined with the guest's name and the event's
+    name/date/tag -- one row per review, most recent first.
+
+    This is what admin_analytics.py builds its sentiment charts and
+    table from, same idea as get_all_registrations_detailed() above.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT
+            rv.review_id, rv.review_text, rv.sentiment_score, rv.rating,
+            g.guest_id, g.name AS guest_name,
+            e.event_id, e.event_name, e.event_date, e.tag
+        FROM reviews rv
+        JOIN guests g ON g.guest_id = rv.guest_id
+        JOIN events e ON e.event_id = rv.event_id
+        ORDER BY rv.review_id DESC
+    """)
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
 # ---------------------------------------------------------------------
 # Settings (small admin toggles, stored in the DB so they persist
 # across browser sessions -- unlike st.session_state)
@@ -736,34 +766,61 @@ _LAST_NAMES = ["Sharma", "Verma", "Gupta", "Patil", "Reddy", "Nair",
                "Mehta", "Kapoor"]
 
 _REVIEWS_POSITIVE = [
-    ("Amazing event, loved every moment of it!", 0.85),
-    ("Really well organized and so much fun.", 0.75),
-    ("One of the best events I've been to this year.", 0.80),
-    ("Great vibe, great people, would definitely come again.", 0.78),
-    ("Everything ran smoothly, had a wonderful time.", 0.70),
+    "Amazing event, loved every moment of it!",
+    "Really well organized and so much fun.",
+    "One of the best events I've been to this year.",
+    "Great vibe, great people, would definitely come again.",
+    "Everything ran smoothly, had a wonderful time.",
 ]
 _REVIEWS_NEUTRAL = [
-    ("It was okay, nothing special but not bad either.", 0.05),
-    ("Decent event, could have been better organized.", -0.05),
-    ("Average experience overall.", 0.0),
+    "It was okay, nothing special but not bad either.",
+    "Decent event, could have been better organized.",
+    "Average experience overall.",
 ]
 _REVIEWS_NEGATIVE = [
-    ("Quite disappointing, expected a lot more.", -0.60),
-    ("Poorly organized, long wait times and confusion.", -0.75),
-    ("Not worth it, wouldn't recommend.", -0.70),
+    "Quite disappointing, expected a lot more.",
+    "Poorly organized, long wait times and confusion.",
+    "Not worth it, wouldn't recommend.",
 ]
+
+# Star ratings a real guest would plausibly leave alongside each kind
+# of review text -- e.g. someone writing a clearly positive review
+# almost always leaves 4 or 5 stars, not 2. random.choice() picking
+# from these short weighted lists gives seeded reviews a rating that
+# actually matches their tone, instead of leaving rating empty like
+# before.
+_RATINGS_BY_BUCKET = {
+    "positive": [5, 5, 5, 4],
+    "neutral": [3, 3, 2, 4],
+    "negative": [1, 1, 2],
+}
 
 
 def _pick_review():
-    """Pick one (text, sentiment_score) pair, weighted toward positive --
-    most real post-event reviews skew positive, since happy attendees
-    are more likely to bother leaving one at all."""
-    bucket = random.choices(
-        [_REVIEWS_POSITIVE, _REVIEWS_NEUTRAL, _REVIEWS_NEGATIVE],
+    """Pick one (text, rating) pair for a seeded review, weighted
+    toward positive -- most real post-event reviews skew positive,
+    since happy attendees are more likely to bother leaving one at all.
+
+    Note: this used to also hand back a made-up sentiment_score
+    alongside the text. That's gone now -- seed_sample_data() below
+    runs every generated review through the real sentiment model
+    instead, the same one real guest reviews go through, so the
+    Analytics page shows genuine model output either way rather than a
+    mix of real and hand-picked numbers. The star rating returned here
+    is still a plausible guess (there's no model for that), matched to
+    whichever bucket the text came from."""
+    bucket_name, bucket_texts = random.choices(
+        [
+            ("positive", _REVIEWS_POSITIVE),
+            ("neutral", _REVIEWS_NEUTRAL),
+            ("negative", _REVIEWS_NEGATIVE),
+        ],
         weights=[0.55, 0.25, 0.20],
         k=1,
     )[0]
-    return random.choice(bucket)
+    text = random.choice(bucket_texts)
+    rating = random.choice(_RATINGS_BY_BUCKET[bucket_name])
+    return text, rating
 
 
 def _make_similar_name(name):
@@ -851,6 +908,14 @@ def seed_sample_data():
         added["guests"] += 1
 
     # --- Registrations (+ reviews for attended guests on past events) ---
+    # Reviews aren't inserted immediately -- their text/rating get
+    # collected into pending_reviews first, and all the text gets
+    # scored together in one batch call below (after this loop),
+    # instead of loading the sentiment model and scoring one at a time
+    # as we go. See score_sentiment_batch() in utils/ml.py for why
+    # that's faster.
+    pending_reviews = []  # list of (guest_id, event_id, review_text, rating)
+
     for event_id, event_date, is_past in events:
         attendee_count = random.randint(max(1, num_guests // 3), int(num_guests * 0.7))
         attendees = random.sample(guest_ids, k=min(attendee_count, len(guest_ids)))
@@ -890,8 +955,19 @@ def seed_sample_data():
             # Only attended guests can leave a review, and even then
             # not everyone bothers -- about half do.
             if status == "attended" and random.random() < 0.5:
-                text, score = _pick_review()
-                add_review(guest_id, event_id, text, score)
-                added["reviews"] += 1
+                text, rating = _pick_review()
+                pending_reviews.append((guest_id, event_id, text, rating))
+
+    # Score every pending review's text in one batch call, then insert
+    # them all with their real sentiment_score (+ the plausible rating
+    # picked alongside the text above). If nothing qualified for a
+    # review (e.g. no past events yet), skip this entirely so we don't
+    # load the sentiment model for no reason.
+    if pending_reviews:
+        texts = [text for (_, _, text, _) in pending_reviews]
+        scores = score_sentiment_batch(texts)
+        for (guest_id, event_id, text, rating), score in zip(pending_reviews, scores):
+            add_review(guest_id, event_id, text, sentiment_score=score, rating=rating)
+            added["reviews"] += 1
 
     return added

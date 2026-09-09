@@ -29,6 +29,7 @@ from utils.db import (
     get_bypass_setting,
     add_review,
 )
+from utils.ml import score_sentiment
 
 init_db()
 
@@ -76,10 +77,20 @@ if ticket_code:
                         if not review_text.strip():
                             st.error("Please write a few words before submitting.")
                         else:
+                            # score_sentiment() runs the text through a
+                            # HuggingFace model (see utils/ml.py). The
+                            # very first review submitted after the app
+                            # starts will pause here for a few seconds
+                            # while that model loads -- the spinner is
+                            # just so the guest sees something's
+                            # happening instead of the page looking frozen.
+                            with st.spinner("Analyzing your feedback..."):
+                                sentiment_score = score_sentiment(review_text.strip())
                             add_review(
                                 registration["guest_id"],
                                 registration["event_id"],
                                 review_text.strip(),
+                                sentiment_score=sentiment_score,
                                 rating=rating,
                             )
                             st.success("Thanks for your feedback!")

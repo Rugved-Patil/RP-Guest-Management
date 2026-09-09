@@ -41,9 +41,17 @@ st.write(
     "attended. Safe to click more than once -- it adds on top of whatever's "
     "already there rather than replacing it."
 )
+st.caption(
+    "Every generated review is scored by the real sentiment model "
+    "(same one the Leave a Review page uses) -- the first click after "
+    "starting the app will take longer than usual while that model "
+    "loads, and its very first run ever on this machine also has to "
+    "download it (~260MB, needs internet just that once)."
+)
 
 if st.button("Add Sample Data"):
-    summary = seed_sample_data()
+    with st.spinner("Generating sample data and scoring reviews..."):
+        summary = seed_sample_data()
     st.success(
         f"Added {summary['events']} events, {summary['guests']} guests, "
         f"{summary['registrations']} registrations, and {summary['reviews']} reviews."
