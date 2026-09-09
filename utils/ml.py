@@ -29,13 +29,6 @@ from functools import lru_cache
 
 MODEL_NAME = "distilbert-base-uncased-finetuned-sst-2-english"
 
-# This model only outputs POSITIVE or NEGATIVE (see score_sentiment
-# below for how that becomes a -1..1 number) -- it has no built-in
-# "neutral" class. We fake one: any score whose *magnitude* is smaller
-# than this counts as "Neutral" for display purposes, since that means
-# the model itself wasn't very confident either way.
-NEUTRAL_BAND = 0.15
-
 
 @lru_cache(maxsize=1)
 def _get_pipeline():
@@ -108,13 +101,14 @@ def score_sentiment_batch(texts):
 def sentiment_label(score):
     """
     Turn a -1..1 score into a human-readable label for display:
-    "Positive", "Neutral", or "Negative". A None score (not yet
-    scored) comes back as "Unscored".
+    "Positive" or "Negative". A None score (not yet scored) comes back
+    as "Unscored".
+
+    There's no "Neutral" here on purpose -- this model only has two
+    classes (see the module docstring above), so anything it scores
+    always leans one way or the other. A middle "Neutral" band would
+    just be mislabeling confident model output as uncertain.
     """
     if score is None:
         return "Unscored"
-    if score > NEUTRAL_BAND:
-        return "Positive"
-    if score < -NEUTRAL_BAND:
-        return "Negative"
-    return "Neutral"
+    return "Positive" if score >= 0 else "Negative"

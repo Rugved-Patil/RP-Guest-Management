@@ -86,10 +86,9 @@ st.divider()
 # --- Sentiment distribution ----------------------------------------------
 st.subheader("Sentiment breakdown")
 
-LABEL_ORDER = ["Positive", "Neutral", "Negative", "Unscored"]
+LABEL_ORDER = ["Positive", "Negative", "Unscored"]
 LABEL_COLORS = {
     "Positive": "#2ecc71",
-    "Neutral": "#95a5a6",
     "Negative": "#e74c3c",
     "Unscored": "#dfe6e9",
 }
