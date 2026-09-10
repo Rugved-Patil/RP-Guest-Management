@@ -36,3 +36,4 @@ websockets==16.1.1
 transformers
 torch
 plotly
+scikit-learn

@@ -543,17 +543,19 @@ def get_all_registrations_detailed():
     This is what admin_manage.py builds its table from: it has the
     ticket code and attendance status (which live on the registration)
     right alongside the guest's name/email/phone and the event's
-    name/date, so nothing needs a second lookup.
+    name/date/tag, so nothing needs a second lookup. Also includes
+    predicted_no_show, which admin_analytics.py uses to display the
+    no-show model's saved predictions alongside guest/event names.
     """
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("""
         SELECT
             r.registration_id, r.ticket_code, r.attendance_status,
-            r.registered_at, r.checked_in_at,
+            r.registered_at, r.checked_in_at, r.predicted_no_show,
             g.guest_id, g.name AS guest_name, g.email, g.phone,
             g.possible_duplicate_of, g.duplicate_match_score,
-            e.event_id, e.event_name, e.event_date
+            e.event_id, e.event_name, e.event_date, e.tag
         FROM registrations r
         JOIN guests g ON g.guest_id = r.guest_id
         JOIN events e ON e.event_id = r.event_id
@@ -562,6 +564,57 @@ def get_all_registrations_detailed():
     rows = cur.fetchall()
     conn.close()
     return rows
+
+
+def get_registrations_for_noshow_model():
+    """
+    Return every registration with just what the no-show model (see
+    utils/ml.py) needs: which guest, which event (+ its tag and date),
+    when they registered, and the outcome (attendance_status) if it's
+    already known.
+
+    Unlike get_all_registrations_detailed() above, this includes
+    predicted_no_show and leaves out guest/event display fields
+    (email, phone, event name...) the model has no use for.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT
+            r.registration_id, r.guest_id, r.event_id,
+            r.attendance_status, r.registered_at, r.predicted_no_show,
+            e.event_date, e.tag
+        FROM registrations r
+        JOIN events e ON e.event_id = r.event_id
+    """)
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def bulk_set_predicted_no_show(predictions):
+    """
+    Save predicted no-show probabilities for a batch of registrations
+    at once. `predictions` is a list of (registration_id, probability)
+    tuples -- probability is a float from 0 (certain to attend) to 1
+    (certain to no-show).
+
+    Uses executemany() (one round-trip for the whole batch) rather
+    than looping and calling this once per row, same reasoning as
+    score_sentiment_batch() being faster than scoring reviews one by
+    one.
+    """
+    if not predictions:
+        return
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.executemany(
+        "UPDATE registrations SET predicted_no_show = ? WHERE registration_id = ?",
+        [(prob, reg_id) for (reg_id, prob) in predictions],
+    )
+    conn.commit()
+    conn.close()
+
 
 def has_review(guest_id, event_id):
     """True if this guest has already left a review for this event."""
@@ -757,6 +810,20 @@ _EVENT_NAMES_BY_TAG = {
               "Hip-Hop Showcase", "Ballroom Dance Gala"],
 }
 
+# How much each event tag nudges attendance up or down, on top of a
+# guest's own reliability (see guest_reliability in seed_sample_data
+# below). E.g. free/outdoor Sports events realistically get skipped
+# more often than a ticketed Play. This exists purely so the no-show
+# model (utils/ml.py) has a second real, non-guest-specific pattern to
+# find in the sample data besides "this particular guest tends to flake."
+_TAG_ATTEND_SHIFT = {
+    "Movie": 0.05,
+    "Play": 0.03,
+    "Sports": -0.12,
+    "Dance": 0.0,
+}
+
+
 _FIRST_NAMES = ["Aarav", "Vivaan", "Aditya", "Vihaan", "Arjun", "Sai",
                 "Reyansh", "Ayaan", "Ishaan", "Kabir", "Ananya", "Diya",
                 "Saanvi", "Aadhya", "Kiara", "Myra", "Pari", "Anika",
@@ -881,7 +948,7 @@ def seed_sample_data():
         end_time = f"{end_hour:02d}:{start_minute:02d}"
 
         event_id = add_event(name, event_date.isoformat(), start_time, end_time, tag)
-        events.append((event_id, event_date, event_date < today))
+        events.append((event_id, event_date, event_date < today, tag))
         added["events"] += 1
 
     # --- Guests: a pool of fresh names, plus a handful of deliberate
@@ -907,6 +974,21 @@ def seed_sample_data():
         guest_ids.append(guest_id)
         added["guests"] += 1
 
+    # Each guest gets a hidden "reliability" -- their personal tendency
+    # to actually show up -- used below to decide attended/no_show for
+    # past events. This is what makes no-show prediction meaningful:
+    # without it, every guest would have the exact same flat chance of
+    # attending regardless of their event history, and a model trained
+    # on that data couldn't learn anything real. random.betavariate(6, 2)
+    # picks values between 0 and 1 shaped so most land near 0.75 (our
+    # overall target attendance rate) while some guests are naturally
+    # more or less reliable than others. This number itself is never
+    # stored anywhere -- the model has to infer it purely from each
+    # guest's visible past attendance, same as it would with real guests.
+    guest_reliability = {
+        guest_id: random.betavariate(6, 2) for guest_id in guest_ids
+    }
+
     # --- Registrations (+ reviews for attended guests on past events) ---
     # Reviews aren't inserted immediately -- their text/rating get
     # collected into pending_reviews first, and all the text gets
@@ -916,7 +998,7 @@ def seed_sample_data():
     # that's faster.
     pending_reviews = []  # list of (guest_id, event_id, review_text, rating)
 
-    for event_id, event_date, is_past in events:
+    for event_id, event_date, is_past, tag in events:
         attendee_count = random.randint(max(1, num_guests // 3), int(num_guests * 0.7))
         attendees = random.sample(guest_ids, k=min(attendee_count, len(guest_ids)))
 
@@ -930,8 +1012,14 @@ def seed_sample_data():
             ).isoformat(timespec="seconds")
 
             if is_past:
-                # Realistic show-up rate: ~75% attend, ~25% no-show.
-                if random.random() < 0.75:
+                # This guest's own reliability, nudged up or down by
+                # how flaky this event's tag tends to be -- clamped so
+                # every guest still has *some* chance of going either
+                # way, however reliable or unreliable they are.
+                attend_probability = guest_reliability[guest_id] + _TAG_ATTEND_SHIFT.get(tag, 0.0)
+                attend_probability = min(0.97, max(0.03, attend_probability))
+
+                if random.random() < attend_probability:
                     status = "attended"
                     checked_in_at = datetime.combine(
                         event_date, dtime(random.randint(9, 21), random.choice([0, 15, 30, 45]))
