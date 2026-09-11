@@ -1,9 +1,9 @@
 """
 utils/ml.py
 ------------
-AI/Data Science helpers: sentiment analysis on guest reviews, and
-no-show prediction. Guest segmentation and turnout forecasting will
-land in this same file as those features get built.
+AI/Data Science helpers: sentiment analysis on guest reviews, no-show
+prediction, and guest segmentation. Turnout forecasting will land in
+this same file once that feature gets built.
 
 --- What "sentiment analysis" means here ---
 We want to turn a review's free-text ("Amazing event, loved it!") into
@@ -31,6 +31,17 @@ every guest who registered for a past event, did they show up or not?
 Once it's found a pattern in that history, it applies the same pattern
 to guests who've registered for events that haven't happened yet, and
 gives each one a 0-100% no-show risk.
+
+--- What "guest segmentation" means here ---
+This groups guests into VIP / Regular / New based on how often they
+show up. "New" is decided by a simple rule (too little history to
+say anything about behavior yet). VIP vs. Regular is decided by
+K-Means -- an algorithm that's handed a pile of guests, each
+described by two numbers (how many events they've attended, and what
+fraction of the time they actually showed up), and groups them into
+2 clusters of "guests who behave similarly," with no labels attached.
+We then look at which of the 2 clusters attends more often and more
+reliably and call that one "VIP".
 """
 
 from functools import lru_cache
@@ -312,4 +323,128 @@ def train_and_predict_noshow(rows):
         "coefficients": coefficients,
         "train_rows": len(resolved),
         "train_accuracy": round(float(train_accuracy), 4),
+    }
+
+
+# ---------------------------------------------------------------------
+# Guest segmentation
+# ---------------------------------------------------------------------
+# A guest below this many *resolved* (attended/no_show) registrations
+# doesn't have enough of a track record to say anything about their
+# behavior yet -- they're tagged "New" by this rule alone and never
+# reach the clustering step below. 2 is a low bar on purpose: a guest
+# with exactly 1 resolved event has attended either 0% or 100% of the
+# time, which isn't a meaningful "rate" yet, just a single coin flip.
+MIN_EVENTS_FOR_VETERAN = 2
+
+
+def segment_guests(rows):
+    """
+    Tag every guest as "New", "Regular", or "VIP".
+
+    `rows` should come from db.get_guests_for_segmentation() -- passed
+    in rather than queried here for the same circular-import reason
+    described on train_and_predict_noshow() above.
+
+    Guests with fewer than MIN_EVENTS_FOR_VETERAN resolved
+    registrations are tagged "New" directly (see the constant's
+    comment above). Everyone else ("veteran" guests) gets clustered by
+    K-Means into 2 groups based on two features:
+      - event_count: how many resolved registrations they have
+      - attendance_rate: what fraction of those they actually attended
+
+    Both features are standardized (StandardScaler) before clustering
+    -- without this, event_count (which might range 2-20) would
+    dominate attendance_rate (which only ranges 0-1) just because its
+    numbers are bigger, not because it actually matters more. Scaling
+    puts both on equal footing, matching the "no feature is
+    hand-weighted over the other" approach used throughout this
+    project's models.
+
+    K-Means itself has no idea which of its 2 clusters should be
+    called "VIP" -- it only knows "these guests are similar to each
+    other." So after fitting, whichever cluster's center sits higher
+    on both standardized features combined is labeled "VIP"; the other
+    is "Regular".
+
+    Returns a dict:
+      status: "not_enough_data" | "ok"
+      assignments: [(guest_id, segment), ...] for every guest passed in
+      new_count / veteran_count / vip_count / regular_count: for the
+        summary shown after running this
+
+    If fewer than 2 veteran guests exist, there's nothing to compare
+    them against each other on, so K-Means (which needs at least as
+    many points as clusters) can't run -- any veteran guests fall back
+    to "Regular" rather than blocking the whole feature on a tiny
+    dataset.
+    """
+    if not rows:
+        return {
+            "status": "not_enough_data", "assignments": [],
+            "new_count": 0, "veteran_count": 0, "vip_count": 0, "regular_count": 0,
+        }
+
+    new_assignments = []
+    veteran_rows = []
+    for row in rows:
+        if row["resolved_count"] < MIN_EVENTS_FOR_VETERAN:
+            new_assignments.append((row["guest_id"], "New"))
+        else:
+            veteran_rows.append({
+                "guest_id": row["guest_id"],
+                "event_count": row["resolved_count"],
+                "attendance_rate": row["attended_count"] / row["resolved_count"],
+            })
+
+    if len(veteran_rows) < 2:
+        fallback_assignments = [(r["guest_id"], "Regular") for r in veteran_rows]
+        assignments = new_assignments + fallback_assignments
+        return {
+            "status": "ok",
+            "assignments": assignments,
+            "new_count": len(new_assignments),
+            "veteran_count": len(veteran_rows),
+            "vip_count": 0,
+            "regular_count": len(fallback_assignments),
+        }
+
+    import pandas as pd
+    from sklearn.cluster import KMeans
+    from sklearn.preprocessing import StandardScaler
+
+    features = pd.DataFrame({
+        "event_count": [r["event_count"] for r in veteran_rows],
+        "attendance_rate": [r["attendance_rate"] for r in veteran_rows],
+    })
+
+    X_scaled = StandardScaler().fit_transform(features)
+
+    # random_state fixes the algorithm's random starting points so the
+    # same data always produces the same clusters -- without it,
+    # re-running this could occasionally flip which guests land in
+    # which cluster from one click to the next, which would be
+    # confusing to see (and hard to explain) in a demo.
+    model = KMeans(n_clusters=2, n_init=10, random_state=42)
+    cluster_ids = model.fit_predict(X_scaled)
+
+    # cluster_centers_ is in the same standardized units as X_scaled --
+    # summing each center's two coordinates gives one "how VIP-like is
+    # this cluster overall" score per cluster; the higher one wins.
+    center_scores = model.cluster_centers_.sum(axis=1)
+    vip_cluster_id = int(center_scores.argmax())
+
+    veteran_assignments = [
+        (r["guest_id"], "VIP" if cluster_id == vip_cluster_id else "Regular")
+        for r, cluster_id in zip(veteran_rows, cluster_ids)
+    ]
+    vip_count = sum(1 for _, label in veteran_assignments if label == "VIP")
+
+    return {
+        "status": "ok",
+        "assignments": new_assignments + veteran_assignments,
+        "new_count": len(new_assignments),
+        "veteran_count": len(veteran_rows),
+        "vip_count": vip_count,
+        "regular_count": len(veteran_assignments) - vip_count,
     }

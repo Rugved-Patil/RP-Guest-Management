@@ -110,6 +110,8 @@ def _ensure_guests_columns(conn):
         cur.execute("ALTER TABLE guests ADD COLUMN possible_duplicate_of INTEGER")
     if "duplicate_match_score" not in existing_columns:
         cur.execute("ALTER TABLE guests ADD COLUMN duplicate_match_score REAL")
+    if "segment" not in existing_columns:
+        cur.execute("ALTER TABLE guests ADD COLUMN segment TEXT")
 
     conn.commit()
 
@@ -130,7 +132,8 @@ def init_db():
             email TEXT NOT NULL,
             phone TEXT,
             possible_duplicate_of INTEGER,
-            duplicate_match_score REAL
+            duplicate_match_score REAL,
+            segment TEXT
         )
     """)
 
@@ -554,7 +557,7 @@ def get_all_registrations_detailed():
             r.registration_id, r.ticket_code, r.attendance_status,
             r.registered_at, r.checked_in_at, r.predicted_no_show,
             g.guest_id, g.name AS guest_name, g.email, g.phone,
-            g.possible_duplicate_of, g.duplicate_match_score,
+            g.possible_duplicate_of, g.duplicate_match_score, g.segment,
             e.event_id, e.event_name, e.event_date, e.tag
         FROM registrations r
         JOIN guests g ON g.guest_id = r.guest_id
@@ -611,6 +614,64 @@ def bulk_set_predicted_no_show(predictions):
     cur.executemany(
         "UPDATE registrations SET predicted_no_show = ? WHERE registration_id = ?",
         [(prob, reg_id) for (reg_id, prob) in predictions],
+    )
+    conn.commit()
+    conn.close()
+
+
+# ---------------------------------------------------------------------
+# Guest segmentation
+# ---------------------------------------------------------------------
+
+def get_guests_for_segmentation():
+    """
+    Return every guest with the two counts utils/ml.py's segment_guests()
+    needs: how many of their registrations are "resolved" (the event
+    already happened, so the real outcome -- attended or no_show -- is
+    known), and how many of those were attended. Also includes the
+    guest's name/email and their current saved segment, so this same
+    query can feed both the model (which only cares about the counts)
+    and admin_analytics.py's results table (which needs the display
+    fields too) without querying twice.
+
+    LEFT JOIN (not JOIN) so a guest with zero registrations still shows
+    up as one row with resolved_count = 0, rather than being dropped
+    entirely -- that's exactly the case segment_guests() tags "New".
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT
+            g.guest_id, g.name AS guest_name, g.email, g.segment,
+            COUNT(CASE WHEN r.attendance_status IN ('attended', 'no_show') THEN 1 END)
+                AS resolved_count,
+            COUNT(CASE WHEN r.attendance_status = 'attended' THEN 1 END)
+                AS attended_count
+        FROM guests g
+        LEFT JOIN registrations r ON r.guest_id = g.guest_id
+        GROUP BY g.guest_id, g.name, g.email, g.segment
+        ORDER BY g.name
+    """)
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def bulk_set_segment(assignments):
+    """
+    Save segment labels ("VIP" / "Regular" / "New") for a batch of
+    guests at once. `assignments` is a list of (guest_id, segment)
+    tuples -- same executemany-in-one-batch approach as
+    bulk_set_predicted_no_show() above, for the same reason (one
+    round-trip instead of one UPDATE per guest).
+    """
+    if not assignments:
+        return
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.executemany(
+        "UPDATE guests SET segment = ? WHERE guest_id = ?",
+        [(segment, guest_id) for (guest_id, segment) in assignments],
     )
     conn.commit()
     conn.close()

@@ -89,6 +89,7 @@ for r in filtered:
         "Guest": r["guest_name"],
         "Email": r["email"],
         "Phone": r["phone"] or "--",
+        "Segment": r["segment"] or "Not yet segmented",
         "Event": r["event_name"],
         "Event Date": date.fromisoformat(r["event_date"]).strftime("%d-%m-%Y"),
         "Ticket Code": r["ticket_code"],

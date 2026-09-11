@@ -1,16 +1,16 @@
 """
 pages/admin_analytics.py
 --------------------------
-Admin-facing page: sentiment analysis on guest reviews, and no-show
-risk prediction. Guest segmentation and turnout forecasting will get
-added to this same page later as those pieces get built.
+Admin-facing page: sentiment analysis on guest reviews, no-show risk
+prediction, and guest segmentation. Turnout forecasting will get added
+to this same page later once that piece gets built.
 
-Both sections work the same basic way: a model in utils/ml.py turns
-raw data into a number, and this page charts/tables it. Sentiment
-scores get computed elsewhere (at review submission, or during sample
-data seeding) and this page just reads them. No-show predictions, on
-the other hand, are trained and scored right here, on demand, via the
-"Run No-Show Prediction" button below.
+All three sections work the same basic way: a model in utils/ml.py
+turns raw data into a number, and this page charts/tables it.
+Sentiment scores get computed elsewhere (at review submission, or
+during sample data seeding) and this page just reads them. No-show
+predictions and guest segments, on the other hand, are trained and
+scored right here, on demand, via their "Run..." buttons below.
 """
 
 import streamlit as st
@@ -23,8 +23,15 @@ from utils.db import (
     get_all_registrations_detailed,
     get_registrations_for_noshow_model,
     bulk_set_predicted_no_show,
+    get_guests_for_segmentation,
+    bulk_set_segment,
 )
-from utils.ml import sentiment_label, train_and_predict_noshow
+from utils.ml import (
+    sentiment_label,
+    train_and_predict_noshow,
+    segment_guests,
+    MIN_EVENTS_FOR_VETERAN,
+)
 
 init_db()
 
@@ -311,6 +318,120 @@ def render_noshow_section():
     st.dataframe(table_rows, use_container_width=True)
 
 
+def render_segmentation_section():
+    st.header("Guest segmentation")
+    st.write(
+        "Tags every guest as **New** (fewer than "
+        f"{MIN_EVENTS_FOR_VETERAN} past events -- not enough history to "
+        "say anything about their behavior yet), or clusters everyone "
+        "else into **VIP** / **Regular** based on how often they attend "
+        "and how reliably they show up once registered."
+    )
+
+    if st.button("Run Segmentation"):
+        with st.spinner("Grouping guests by attendance history..."):
+            guest_rows = get_guests_for_segmentation()
+            result = segment_guests(guest_rows)
+
+        if result["status"] == "not_enough_data":
+            st.warning(
+                "No guests found yet -- add some via registration or the "
+                "Data Tools page, then try again."
+            )
+        else:
+            bulk_set_segment(result["assignments"])
+            st.success(
+                f"Segmented {len(result['assignments'])} guest(s): "
+                f"{result['new_count']} New, {result['veteran_count']} with "
+                f"enough history to cluster ({result['vip_count']} VIP, "
+                f"{result['regular_count']} Regular)."
+            )
+            if 0 < result["veteran_count"] < 2:
+                st.caption(
+                    "Only one guest had enough history to consider for "
+                    "VIP/Regular -- defaulted to Regular, since there's "
+                    "nothing yet to compare them against. This will start "
+                    "splitting into VIP/Regular once at least 2 guests "
+                    "clear the history threshold."
+                )
+
+    st.divider()
+
+    # Always show the current state of segments -- whether just computed
+    # above, or from an earlier run -- straight from the database, same
+    # reasoning as the no-show section above.
+    guest_rows = get_guests_for_segmentation()
+
+    if not guest_rows:
+        st.info("No guests yet.")
+        return
+
+    rows = []
+    for g in guest_rows:
+        resolved = g["resolved_count"]
+        rows.append({
+            "guest_name": g["guest_name"],
+            "email": g["email"],
+            "events": resolved,
+            "attendance_rate": (g["attended_count"] / resolved) if resolved else None,
+            "segment": g["segment"] or "Not yet segmented",
+        })
+    df = pd.DataFrame(rows)
+
+    SEGMENT_ORDER = ["VIP", "Regular", "New", "Not yet segmented"]
+    SEGMENT_COLORS = {
+        "VIP": "#f1c40f",
+        "Regular": "#3498db",
+        "New": "#95a5a6",
+        "Not yet segmented": "#dfe6e9",
+    }
+
+    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+    kpi1.metric("Total guests", len(df))
+    kpi2.metric("VIP", int((df["segment"] == "VIP").sum()))
+    kpi3.metric("Regular", int((df["segment"] == "Regular").sum()))
+    kpi4.metric("New", int((df["segment"] == "New").sum()))
+
+    st.subheader("Segment breakdown")
+    counts = df["segment"].value_counts().reindex(SEGMENT_ORDER, fill_value=0)
+    counts = counts[counts > 0]
+    fig_seg = px.pie(
+        names=counts.index,
+        values=counts.values,
+        color=counts.index,
+        color_discrete_map=SEGMENT_COLORS,
+        hole=0.4,
+    )
+    fig_seg.update_traces(textinfo="label+percent")
+    st.plotly_chart(fig_seg, use_container_width=True)
+
+    st.divider()
+
+    st.subheader("All guests")
+    segment_options = ["All"] + [s for s in SEGMENT_ORDER if s in df["segment"].unique()]
+    segment_filter = st.selectbox("Filter by segment", segment_options)
+
+    filtered = df if segment_filter == "All" else df[df["segment"] == segment_filter]
+
+    display_rows = []
+    for _, r in filtered.iterrows():
+        display_rows.append({
+            "Guest": r["guest_name"],
+            "Email": r["email"],
+            "Past Events": r["events"],
+            "Attendance Rate": (
+                f"{r['attendance_rate'] * 100:.0f}%"
+                if r["attendance_rate"] is not None else "--"
+            ),
+            "Segment": r["segment"],
+        })
+
+    st.caption(f"Showing {len(display_rows)} of {len(df)} guests.")
+    st.dataframe(display_rows, use_container_width=True)
+
+
 render_sentiment_section()
 st.divider()
 render_noshow_section()
+st.divider()
+render_segmentation_section()
