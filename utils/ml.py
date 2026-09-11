@@ -46,14 +46,17 @@ reliably and call that one "VIP".
 This predicts, for each upcoming event, what fraction of the people
 who register for it will actually show up (0-100%) -- based on how
 that rate has trended across your past, already-completed events over
-time. It uses Prophet, a forecasting library built specifically to
-work with irregularly-spaced dates (your events don't happen on a
-fixed weekly/monthly schedule, which would trip up more rigid
-time-series tools). Unlike the no-show model (which scores individual
-guests) or segmentation (which groups guests), this works entirely at
-the event level: it never looks at who's registered, only at the
-event's date and, for past events, what fraction of registrants
-showed up.
+time, plus each event's tag (Sports, Movie, Dance, ...), so a Sports
+event and a Movie night on nearby dates can get different forecasts
+rather than both defaulting to whatever the overall trend happens to
+be. It uses Prophet, a forecasting library built specifically to work
+with irregularly-spaced dates (your events don't happen on a fixed
+weekly/monthly schedule, which would trip up more rigid time-series
+tools). Unlike the no-show model (which scores individual guests) or
+segmentation (which groups guests), this works entirely at the event
+level: it never looks at who's registered, only at the event's date
+and tag, and, for past events, what fraction of registrants showed
+up.
 """
 
 from functools import lru_cache
@@ -506,9 +509,27 @@ def train_and_predict_turnout(rows):
     and a small portfolio dataset spanning a few months has nowhere
     near that. Leaving seasonality on with too little data doesn't
     fail loudly -- it just fits confident-looking noise. With it off,
-    Prophet fits a single trend line instead: a simpler, more honest
-    model, directly comparable to the "no rigorous held-out
-    evaluation" caveat already noted on the no-show model above.
+    Prophet fits a trend line plus one flat adjustment per event tag
+    (see below) instead: a simpler, more honest model, directly
+    comparable to the "no rigorous held-out evaluation" caveat already
+    noted on the no-show model above.
+
+    Each event's tag (Sports, Movie, Dance, ...) is passed in as an
+    "extra regressor" -- Prophet's term for an additional input beyond
+    the date -- one-hot encoded the same way the no-show model encodes
+    tag (see _build_features above). Without this, the date trend was
+    the *only* thing that could make two events' forecasts differ, so
+    a Sports event and a Movie night landing around the same time
+    would get back nearly the same number even though their actual
+    turnout rates behave differently. With it, the model can learn
+    "Sports events tend to run a few points lower than Movies," on top
+    of the shared date trend.
+
+    A tag with no (or very few) resolved past events to learn from
+    still gets a regressor column, but with little to no training
+    signal behind it -- its forecasts effectively fall back to the
+    date trend alone for now, and will start reflecting that tag's own
+    behavior as more of its events get checked in.
     """
     if not rows:
         return {"status": "not_enough_data", "predictions": [], "train_events": 0}
@@ -533,19 +554,42 @@ def train_and_predict_turnout(rows):
     import pandas as pd
     from prophet import Prophet
 
-    train_df = pd.DataFrame({
-        "ds": pd.to_datetime([r["event_date"] for r in resolved]),
-        "y": [r["attended_count"] / r["registered_count"] for r in resolved],
-    })
+    # Built across BOTH resolved and upcoming rows so a tag that only
+    # appears in one set still gets a consistent column in the other --
+    # Prophet needs the exact same regressor columns at fit() and
+    # predict() time, or it can't work with the future dataframe.
+    all_tags = sorted({r["tag"] or "Untagged" for r in rows})
+    tag_columns = [f"tag_{t}" for t in all_tags]
+
+    def _tag_dummies(tag):
+        tag = tag or "Untagged"
+        return {f"tag_{t}": (1 if t == tag else 0) for t in all_tags}
+
+    train_df = pd.DataFrame([
+        {
+            "ds": r["event_date"],
+            "y": r["attended_count"] / r["registered_count"],
+            **_tag_dummies(r["tag"]),
+        }
+        for r in resolved
+    ])
+    train_df["ds"] = pd.to_datetime(train_df["ds"])
 
     model = Prophet(
         yearly_seasonality=False,
         weekly_seasonality=False,
         daily_seasonality=False,
     )
+    for col in tag_columns:
+        model.add_regressor(col)
     model.fit(train_df)
 
-    future_df = pd.DataFrame({"ds": pd.to_datetime([r["event_date"] for r in upcoming])})
+    future_df = pd.DataFrame([
+        {"ds": r["event_date"], **_tag_dummies(r["tag"])}
+        for r in upcoming
+    ])
+    future_df["ds"] = pd.to_datetime(future_df["ds"])
+
     forecast = model.predict(future_df)
 
     # Prophet has no idea a turnout rate can't go below 0% or above

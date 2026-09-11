@@ -440,10 +440,10 @@ def render_turnout_section():
     st.write(
         "Fits a trend line (via Prophet) through your past events' "
         "turnout rates over time -- what fraction of registrants "
-        "actually showed up -- and projects that trend forward onto "
-        "every upcoming event already on your calendar. Only events "
-        "where every registration has a known outcome (attended or "
-        "no-show) count as training data."
+        "actually showed up -- adjusted per event tag, and projects "
+        "that forward onto every upcoming event already on your "
+        "calendar. Only events where every registration has a known "
+        "outcome (attended or no-show) count as training data."
     )
 
     if st.button("Run Turnout Forecast"):
