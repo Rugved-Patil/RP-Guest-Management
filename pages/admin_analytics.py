@@ -2,15 +2,15 @@
 pages/admin_analytics.py
 --------------------------
 Admin-facing page: sentiment analysis on guest reviews, no-show risk
-prediction, and guest segmentation. Turnout forecasting will get added
-to this same page later once that piece gets built.
+prediction, guest segmentation, and turnout forecasting.
 
-All three sections work the same basic way: a model in utils/ml.py
+All four sections work the same basic way: a model in utils/ml.py
 turns raw data into a number, and this page charts/tables it.
 Sentiment scores get computed elsewhere (at review submission, or
 during sample data seeding) and this page just reads them. No-show
-predictions and guest segments, on the other hand, are trained and
-scored right here, on demand, via their "Run..." buttons below.
+predictions, guest segments, and turnout forecasts, on the other hand,
+are trained and scored right here, on demand, via their "Run..."
+buttons below.
 """
 
 import streamlit as st
@@ -25,12 +25,17 @@ from utils.db import (
     bulk_set_predicted_no_show,
     get_guests_for_segmentation,
     bulk_set_segment,
+    get_events_for_forecast,
+    bulk_set_predicted_turnout,
 )
 from utils.ml import (
     sentiment_label,
     train_and_predict_noshow,
     segment_guests,
     MIN_EVENTS_FOR_VETERAN,
+    train_and_predict_turnout,
+    MIN_TRAINING_EVENTS,
+    _is_resolved_event,
 )
 
 init_db()
@@ -430,8 +435,137 @@ def render_segmentation_section():
     st.dataframe(display_rows, use_container_width=True)
 
 
+def render_turnout_section():
+    st.header("Turnout forecast")
+    st.write(
+        "Fits a trend line (via Prophet) through your past events' "
+        "turnout rates over time -- what fraction of registrants "
+        "actually showed up -- and projects that trend forward onto "
+        "every upcoming event already on your calendar. Only events "
+        "where every registration has a known outcome (attended or "
+        "no-show) count as training data."
+    )
+
+    if st.button("Run Turnout Forecast"):
+        with st.spinner("Fitting trend and forecasting upcoming events..."):
+            event_rows = get_events_for_forecast()
+            result = train_and_predict_turnout(event_rows)
+
+        if result["status"] == "not_enough_data":
+            st.warning(
+                f"Only {result['train_events']} fully-resolved past event(s) "
+                f"so far (need at least {MIN_TRAINING_EVENTS} -- every "
+                "registration for an event has to be checked in or marked "
+                "no-show for that event to count). Add more sample data on "
+                "the Data Tools page, or check in more past events, then "
+                "try again."
+            )
+        elif result["status"] == "no_predictions_needed":
+            st.info(
+                "Nothing to forecast right now -- every event you have is "
+                "already fully resolved. Forecasts show up here once a new "
+                "event is on the calendar."
+            )
+        else:
+            bulk_set_predicted_turnout(result["predictions"])
+            st.success(
+                f"Forecasted {len(result['predictions'])} upcoming event(s), "
+                f"trained on {result['train_events']} past ones."
+            )
+
+    st.divider()
+
+    # Always show the current state of forecasts -- whether just computed
+    # above, or from an earlier run -- straight from the database, same
+    # reasoning as the other two sections above.
+    event_rows = get_events_for_forecast()
+
+    if not event_rows:
+        st.info("No events yet.")
+        return
+
+    rows = []
+    for e in event_rows:
+        resolved = _is_resolved_event(e)
+        rows.append({
+            "event_name": e["event_name"],
+            "event_date": e["event_date"],
+            "tag": e["tag"] or "--",
+            "registered": e["registered_count"],
+            "attended": e["attended_count"] if resolved else None,
+            "actual_rate": (e["attended_count"] / e["registered_count"]) if resolved else None,
+            "predicted_turnout": e["predicted_turnout"],
+            "status": "Resolved" if resolved else "Upcoming",
+        })
+    df = pd.DataFrame(rows)
+
+    resolved_count = int((df["status"] == "Resolved").sum())
+    upcoming_count = int((df["status"] == "Upcoming").sum())
+    scored_upcoming = int(df.loc[df["status"] == "Upcoming", "predicted_turnout"].notna().sum())
+
+    kpi1, kpi2, kpi3 = st.columns(3)
+    kpi1.metric("Past events (resolved)", resolved_count)
+    kpi2.metric("Upcoming events", upcoming_count)
+    kpi3.metric("Forecasted", scored_upcoming)
+
+    if upcoming_count and scored_upcoming < upcoming_count:
+        st.caption(
+            f"{upcoming_count - scored_upcoming} upcoming event(s) haven't "
+            "been forecasted yet -- click \"Run Turnout Forecast\" above."
+        )
+
+    st.subheader("Actual vs. forecasted turnout")
+
+    chart_rows = []
+    for _, r in df.iterrows():
+        if r["status"] == "Resolved":
+            chart_rows.append({"event": r["event_name"], "date": r["event_date"],
+                                "rate": r["actual_rate"], "type": "Actual"})
+        elif pd.notna(r["predicted_turnout"]):
+            chart_rows.append({"event": r["event_name"], "date": r["event_date"],
+                                "rate": r["predicted_turnout"], "type": "Forecast"})
+
+    if chart_rows:
+        chart_df = pd.DataFrame(chart_rows).sort_values("date")
+        chart_df["label"] = chart_df.apply(
+            lambda row: f"{row['event']} ({date.fromisoformat(row['date']).strftime('%d-%m-%Y')})",
+            axis=1,
+        )
+        fig_turnout = px.bar(
+            chart_df, x="label", y="rate", color="type",
+            color_discrete_map={"Actual": "#3498db", "Forecast": "#e67e22"},
+            labels={"rate": "Turnout rate", "label": "Event", "type": "Type"},
+        )
+        fig_turnout.update_layout(xaxis_tickangle=-30, yaxis_tickformat=".0%")
+        st.plotly_chart(fig_turnout, use_container_width=True)
+    else:
+        st.info("No actual or forecasted turnout to chart yet.")
+
+    st.divider()
+
+    st.subheader("All events")
+    display_rows = []
+    for _, r in df.sort_values("event_date").iterrows():
+        display_rows.append({
+            "Event": r["event_name"],
+            "Date": date.fromisoformat(r["event_date"]).strftime("%d-%m-%Y"),
+            "Tag": r["tag"],
+            "Registered": r["registered"],
+            "Attended": r["attended"] if pd.notna(r["attended"]) else "--",
+            "Actual Turnout": f"{r['actual_rate'] * 100:.0f}%" if pd.notna(r["actual_rate"]) else "--",
+            "Forecasted Turnout": (
+                f"{r['predicted_turnout'] * 100:.0f}%"
+                if pd.notna(r["predicted_turnout"]) else "--"
+            ),
+            "Status": r["status"],
+        })
+    st.dataframe(display_rows, use_container_width=True)
+
+
 render_sentiment_section()
 st.divider()
 render_noshow_section()
 st.divider()
 render_segmentation_section()
+st.divider()
+render_turnout_section()

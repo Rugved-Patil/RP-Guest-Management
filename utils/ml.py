@@ -2,8 +2,7 @@
 utils/ml.py
 ------------
 AI/Data Science helpers: sentiment analysis on guest reviews, no-show
-prediction, and guest segmentation. Turnout forecasting will land in
-this same file once that feature gets built.
+prediction, guest segmentation, and turnout forecasting.
 
 --- What "sentiment analysis" means here ---
 We want to turn a review's free-text ("Amazing event, loved it!") into
@@ -42,6 +41,19 @@ fraction of the time they actually showed up), and groups them into
 2 clusters of "guests who behave similarly," with no labels attached.
 We then look at which of the 2 clusters attends more often and more
 reliably and call that one "VIP".
+
+--- What "turnout forecasting" means here ---
+This predicts, for each upcoming event, what fraction of the people
+who register for it will actually show up (0-100%) -- based on how
+that rate has trended across your past, already-completed events over
+time. It uses Prophet, a forecasting library built specifically to
+work with irregularly-spaced dates (your events don't happen on a
+fixed weekly/monthly schedule, which would trip up more rigid
+time-series tools). Unlike the no-show model (which scores individual
+guests) or segmentation (which groups guests), this works entirely at
+the event level: it never looks at who's registered, only at the
+event's date and, for past events, what fraction of registrants
+showed up.
 """
 
 from functools import lru_cache
@@ -447,4 +459,107 @@ def segment_guests(rows):
         "veteran_count": len(veteran_rows),
         "vip_count": vip_count,
         "regular_count": len(veteran_assignments) - vip_count,
+    }
+
+
+# ---------------------------------------------------------------------
+# Turnout forecasting
+# ---------------------------------------------------------------------
+# Below this many fully-resolved past events, there isn't enough of a
+# trend line for Prophet to fit anything meaningful -- it'd just be
+# drawing a line through a handful of dots. Events happen far less
+# often than registrations do (this project's whole dataset might only
+# have a dozen events total), so this bar is set much lower than
+# MIN_TRAINING_ROWS above -- 4 is enough to demo the mechanism on a
+# small portfolio dataset, not to make the forecast rigorous.
+MIN_TRAINING_EVENTS = 4
+
+
+def _is_resolved_event(row):
+    """
+    An event is "resolved" -- its true turnout rate is fully known --
+    only if it has at least one registration AND every one of those
+    registrations has a known outcome (attended/no_show). See the
+    longer explanation on db.get_events_for_forecast().
+    """
+    return row["registered_count"] > 0 and row["resolved_count"] == row["registered_count"]
+
+
+def train_and_predict_turnout(rows):
+    """
+    Fit a Prophet forecasting model on past (resolved) events' turnout
+    rates over time, and predict a turnout rate for every upcoming
+    (not-yet-resolved) event already on the calendar.
+
+    `rows` should come from db.get_events_for_forecast() -- passed in
+    rather than queried here, same circular-import reasoning as
+    train_and_predict_noshow() and segment_guests() above.
+
+    Returns a dict:
+      status: "not_enough_data" | "no_predictions_needed" | "ok"
+      predictions: [(event_id, predicted_turnout_rate), ...]
+      train_events: how many resolved events were trained on
+
+    Seasonality (day-of-week / time-of-year patterns) is turned off on
+    purpose: Prophet needs a couple of full cycles of data to fit
+    those reliably (e.g. a year+ of history for yearly seasonality),
+    and a small portfolio dataset spanning a few months has nowhere
+    near that. Leaving seasonality on with too little data doesn't
+    fail loudly -- it just fits confident-looking noise. With it off,
+    Prophet fits a single trend line instead: a simpler, more honest
+    model, directly comparable to the "no rigorous held-out
+    evaluation" caveat already noted on the no-show model above.
+    """
+    if not rows:
+        return {"status": "not_enough_data", "predictions": [], "train_events": 0}
+
+    resolved = [r for r in rows if _is_resolved_event(r)]
+    upcoming = [r for r in rows if not _is_resolved_event(r)]
+
+    if len(resolved) < MIN_TRAINING_EVENTS:
+        return {
+            "status": "not_enough_data",
+            "predictions": [],
+            "train_events": len(resolved),
+        }
+
+    if not upcoming:
+        return {
+            "status": "no_predictions_needed",
+            "predictions": [],
+            "train_events": len(resolved),
+        }
+
+    import pandas as pd
+    from prophet import Prophet
+
+    train_df = pd.DataFrame({
+        "ds": pd.to_datetime([r["event_date"] for r in resolved]),
+        "y": [r["attended_count"] / r["registered_count"] for r in resolved],
+    })
+
+    model = Prophet(
+        yearly_seasonality=False,
+        weekly_seasonality=False,
+        daily_seasonality=False,
+    )
+    model.fit(train_df)
+
+    future_df = pd.DataFrame({"ds": pd.to_datetime([r["event_date"] for r in upcoming])})
+    forecast = model.predict(future_df)
+
+    # Prophet has no idea a turnout rate can't go below 0% or above
+    # 100% -- its trend line is free to extrapolate past either edge,
+    # especially for an event date further out than anything it
+    # trained on. Clipping here keeps the number meaningful without
+    # changing what the model actually learned.
+    predictions = [
+        (row["event_id"], round(float(min(max(yhat, 0.0), 1.0)), 4))
+        for row, yhat in zip(upcoming, forecast["yhat"])
+    ]
+
+    return {
+        "status": "ok",
+        "predictions": predictions,
+        "train_events": len(resolved),
     }

@@ -72,6 +72,8 @@ def _ensure_events_columns(conn):
         cur.execute("ALTER TABLE events ADD COLUMN end_time TEXT")
     if "tag" not in existing_columns:
         cur.execute("ALTER TABLE events ADD COLUMN tag TEXT")
+    if "predicted_turnout" not in existing_columns:
+        cur.execute("ALTER TABLE events ADD COLUMN predicted_turnout REAL")
 
     conn.commit()
 
@@ -144,7 +146,8 @@ def init_db():
             event_date TEXT NOT NULL,
             start_time TEXT,
             end_time TEXT,
-            tag TEXT
+            tag TEXT,
+            predicted_turnout REAL
         )
     """)
 
@@ -672,6 +675,70 @@ def bulk_set_segment(assignments):
     cur.executemany(
         "UPDATE guests SET segment = ? WHERE guest_id = ?",
         [(segment, guest_id) for (guest_id, segment) in assignments],
+    )
+    conn.commit()
+    conn.close()
+
+
+# ---------------------------------------------------------------------
+# Turnout forecasting
+# ---------------------------------------------------------------------
+
+def get_events_for_forecast():
+    """
+    Return every event with what utils/ml.py's train_and_predict_turnout()
+    needs (registered_count, attended_count, resolved_count, event_date)
+    plus display fields (event_name, tag, predicted_turnout) for
+    admin_analytics.py's chart/table -- same "one query, two
+    consumers" approach as get_guests_for_segmentation() above.
+
+    resolved_count == registered_count (and > 0) is how an event is
+    recognized as "fully resolved" -- every one of its registrations
+    has a known outcome (attended/no_show), so its true turnout rate
+    can be computed. If resolved_count < registered_count, at least
+    one registration is still sitting at "registered" (check-in never
+    happened, even though other guests at the same event were
+    resolved) -- too ambiguous to treat as ground truth, so it's left
+    out of training rather than guessed at.
+
+    LEFT JOIN so an event with zero registrations still appears (as
+    registered_count = 0) instead of being silently dropped.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT
+            e.event_id, e.event_name, e.event_date, e.tag, e.predicted_turnout,
+            COUNT(r.registration_id) AS registered_count,
+            COUNT(CASE WHEN r.attendance_status = 'attended' THEN 1 END)
+                AS attended_count,
+            COUNT(CASE WHEN r.attendance_status IN ('attended', 'no_show') THEN 1 END)
+                AS resolved_count
+        FROM events e
+        LEFT JOIN registrations r ON r.event_id = e.event_id
+        GROUP BY e.event_id, e.event_name, e.event_date, e.tag, e.predicted_turnout
+        ORDER BY e.event_date
+    """)
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def bulk_set_predicted_turnout(predictions):
+    """
+    Save predicted turnout rates for a batch of events at once.
+    `predictions` is a list of (event_id, rate) tuples, rate being a
+    float from 0 (nobody expected to show) to 1 (everyone expected to
+    show) -- same batch-executemany approach as bulk_set_predicted_no_show()
+    and bulk_set_segment() above.
+    """
+    if not predictions:
+        return
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.executemany(
+        "UPDATE events SET predicted_turnout = ? WHERE event_id = ?",
+        [(rate, event_id) for (event_id, rate) in predictions],
     )
     conn.commit()
     conn.close()
