@@ -4,59 +4,29 @@ utils/ml.py
 AI/Data Science helpers: sentiment analysis on guest reviews, no-show
 prediction, guest segmentation, and turnout forecasting.
 
---- What "sentiment analysis" means here ---
-We want to turn a review's free-text ("Amazing event, loved it!") into
-a number the Analytics page can chart. Rather than writing rules
-ourselves, we use a HuggingFace "pipeline" -- a few lines of code that
-load a model someone else already trained on millions of examples, so
-it works immediately with no training of our own.
+Sentiment analysis: scores each review's free text as positive or
+negative using a pretrained HuggingFace "pipeline" --
+"distilbert-base-uncased-finetuned-sst-2-english", a small transformer
+model already fine-tuned for this, so no training of our own is
+needed. _get_pipeline() loads and caches it once, since loading is
+slow (a few seconds normally, several minutes the first time it has
+to download).
 
-The model used here is "distilbert-base-uncased-finetuned-sst-2-english":
-a small, fast transformer model fine-tuned specifically to classify
-English text as positive or negative.
+No-show prediction: trains a logistic regression on past registrations
+(did each guest show up or not?) and scores guests registered for
+upcoming events with a 0-100% no-show risk.
 
---- Why the caching matters ---
-Loading the model is slow -- a few seconds to read its weights off
-disk, or, the very first time it's ever used on your machine, several
-minutes to download them (~260MB) from the internet. We do NOT want to
-pay that cost every time someone submits a review. _get_pipeline()
-below loads the model once and reuses that same loaded copy for every
-call after that, no matter which page triggered it.
+Guest segmentation: tags guests "New" (too little history) by a simple
+rule, then splits everyone else into "VIP" / "Regular" with K-Means,
+clustering on event count and attendance rate.
 
---- What "no-show prediction" means here ---
-Unlike sentiment (which reads text), this trains a small model of our
-own -- a logistic regression -- on your actual past registrations: for
-every guest who registered for a past event, did they show up or not?
-Once it's found a pattern in that history, it applies the same pattern
-to guests who've registered for events that haven't happened yet, and
-gives each one a 0-100% no-show risk.
+Turnout forecasting: predicts what fraction of registrants will
+actually show up for each upcoming event, using Prophet to fit a trend
+over past events' turnout rates, with event tag as an added regressor
+so different event types can get different forecasts. Prophet is used
+because it handles irregularly-spaced event dates well.
 
---- What "guest segmentation" means here ---
-This groups guests into VIP / Regular / New based on how often they
-show up. "New" is decided by a simple rule (too little history to
-say anything about behavior yet). VIP vs. Regular is decided by
-K-Means -- an algorithm that's handed a pile of guests, each
-described by two numbers (how many events they've attended, and what
-fraction of the time they actually showed up), and groups them into
-2 clusters of "guests who behave similarly," with no labels attached.
-We then look at which of the 2 clusters attends more often and more
-reliably and call that one "VIP".
-
---- What "turnout forecasting" means here ---
-This predicts, for each upcoming event, what fraction of the people
-who register for it will actually show up (0-100%) -- based on how
-that rate has trended across your past, already-completed events over
-time, plus each event's tag (Sports, Movie, Dance, ...), so a Sports
-event and a Movie night on nearby dates can get different forecasts
-rather than both defaulting to whatever the overall trend happens to
-be. It uses Prophet, a forecasting library built specifically to work
-with irregularly-spaced dates (your events don't happen on a fixed
-weekly/monthly schedule, which would trip up more rigid time-series
-tools). Unlike the no-show model (which scores individual guests) or
-segmentation (which groups guests), this works entirely at the event
-level: it never looks at who's registered, only at the event's date
-and tag, and, for past events, what fraction of registrants showed
-up.
+See each function's docstring below for the specifics.
 """
 
 from functools import lru_cache

@@ -10,7 +10,10 @@ from utils.db import init_db, add_event, get_all_events, delete_event
 
 init_db()
 
-# Placeholder categories for now -- easy to extend later.
+# Fixed set of event categories. Also used as a feature by the
+# no-show and turnout-forecasting models in utils/ml.py, so adding a
+# new tag here means it'll show up as a new one-hot column for both --
+# not just a UI-level change.
 TAG_OPTIONS = ["Movie", "Play", "Sports", "Dance"]
 
 st.title("Create Event")

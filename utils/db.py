@@ -26,8 +26,8 @@ from utils.ml import score_sentiment_batch
 
 # Fuzzy-match threshold for find_possible_duplicate() below, 0-100.
 # Higher = stricter (fewer false alarms, but more real duplicates slip
-# through). Tune this in one place if it's flagging too much or too
-# little once you see it running on real data.
+# through). Tune this in one place if it starts flagging too much or
+# too little on real data.
 DUPLICATE_MATCH_THRESHOLD = 85
 
 # The .db file will live in the data/ folder, next to this file's project root.
@@ -53,9 +53,9 @@ def get_connection():
 def _ensure_events_columns(conn):
     """
     Migration helper: if the events table already existed from before
-    start_time/end_time/tag were added (e.g. you tested an earlier
-    version of this app), add the missing columns onto it instead of
-    silently ignoring them.
+    start_time/end_time/tag were added (e.g. from an earlier version
+    of this app), add the missing columns onto it instead of silently
+    ignoring them.
 
     SQLite's ALTER TABLE can only add one column at a time, and can't
     add a NOT NULL column without a default value on an existing table,
@@ -81,9 +81,9 @@ def _ensure_events_columns(conn):
 def _ensure_reviews_columns(conn):
     """
     Migration helper: if the reviews table already existed before the
-    `rating` column was added (your current .db file does), add it in
-    place -- same pattern as the other _ensure_*_columns helpers above.
-    Nullable, so existing seeded/real reviews just show "no rating".
+    `rating` column was added, add it in place -- same pattern as the
+    other _ensure_*_columns helpers above. Nullable, so existing
+    seeded/real reviews just show "no rating".
     """
     cur = conn.cursor()
     cur.execute("PRAGMA table_info(reviews)")
@@ -98,9 +98,9 @@ def _ensure_reviews_columns(conn):
 def _ensure_guests_columns(conn):
     """
     Migration helper: if the guests table already existed from before
-    possible_duplicate_of/duplicate_match_score were added (your
-    current .db file does), add the missing columns onto it instead of
-    silently ignoring them. Same idea as _ensure_events_columns above --
+    possible_duplicate_of/duplicate_match_score were added, add the
+    missing columns onto it instead of silently ignoring them. Same
+    idea as _ensure_events_columns above --
     added as nullable, so existing guest rows just get an empty value
     (meaning "not flagged"), which is exactly what we want for them.
     """
@@ -210,7 +210,8 @@ def add_event(event_name, event_date, start_time, end_time, tag):
     Insert a new event.
     event_date: ISO string, e.g. '2026-09-20'
     start_time / end_time: 24-hour string, e.g. '18:30'
-    tag: one of the placeholder categories, e.g. 'Movie'
+    tag: one of the fixed event categories (see TAG_OPTIONS in
+        admin_events.py), e.g. 'Movie'
     """
     conn = get_connection()
     cur = conn.cursor()
@@ -313,10 +314,10 @@ def add_guest(name, email, phone, possible_duplicate_of=None, duplicate_match_sc
 def _normalize_name_for_matching(name):
     """
     Lowercase a name and sort its words alphabetically.
-    This is what lets "Rugved Patil" and "Patil Rugved" still be
-    recognized as the same name even though the words are swapped --
-    comparing the raw strings directly would score that pair as very
-    different, since string comparison cares about order.
+    This is what lets "Jane Doe" and "Doe Jane" still be recognized as
+    the same name even though the words are swapped -- comparing the
+    raw strings directly would score that pair as very different,
+    since string comparison cares about order.
     """
     words = name.strip().lower().split()
     return " ".join(sorted(words))
@@ -330,8 +331,8 @@ def _name_similarity(name_a, name_b):
     Built on difflib, which ships with Python -- no extra install
     needed. SequenceMatcher.ratio() works by finding the longest
     stretches of matching characters between two strings, so small
-    typos ("Rugved" vs "Rugved" with one letter swapped) still score
-    high, while genuinely different names score low.
+    typos (one swapped letter, say) still score high, while genuinely
+    different names score low.
     """
     a = _normalize_name_for_matching(name_a)
     b = _normalize_name_for_matching(name_b)
@@ -693,8 +694,8 @@ def mark_attendance_by_ticket(ticket_code):
     row, so the page can show the guest's name, event, and timestamp.
 
     Note: this doesn't check the event date at all -- unlike reviews,
-    check-in has no "too early" rule here, since you'd normally only be
-    running this page live at the event itself.
+    check-in has no "too early" rule here, since this page is meant to
+    run live at the event itself.
     """
     registration = get_registration_by_ticket(ticket_code)
     if registration is None:
@@ -949,9 +950,9 @@ def is_review_eligible(registration, bypass=False):
 
     bypass=True skips both checks entirely. Pass the current value of
     the "Bypass review eligibility (testing)" setting from the Data
-    Tools page here -- it exists because attendance/check-in isn't
-    fully wired up yet (admin_attendance.py is still a stub), so there'd
-    otherwise be no way to test this page end-to-end yet.
+    Tools page here -- it exists so the review form can be tested
+    without needing a real, already-passed event with a checked-in
+    guest first.
     """
     if bypass:
         return True
@@ -1067,8 +1068,8 @@ def get_table_counts():
     """
     Return the number of rows in each table, e.g.
     {"guests": 30, "events": 15, "registrations": 210, "reviews": 74}.
-    Used by the Data Tools page so you can see what's there before
-    resetting it, and confirm what got added after seeding.
+    Used by the Data Tools page to show what's there before resetting,
+    and confirm what got added after seeding.
     """
     conn = get_connection()
     cur = conn.cursor()
@@ -1227,7 +1228,7 @@ def seed_sample_data():
 
     Safe to call more than once -- it adds on top of whatever's
     already there rather than replacing it. Use reset_all_data() first
-    if you want a clean slate before seeding.
+    for a clean slate before seeding.
 
     Returns a dict of how many rows of each kind were added, e.g.
     {"events": 15, "guests": 32, "registrations": 187, "reviews": 71}.

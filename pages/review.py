@@ -6,15 +6,15 @@ Guest-facing page: leave a post-event review.
 There's no login system yet, so the ticket code the guest got at
 registration doubles as their identity here -- typing it in is how we
 figure out which guest + which event a review belongs to. Same idea as
-the check-in page (admin_attendance.py) will use later.
+the check-in page (admin_attendance.py) uses.
 
 Flow:
 1. Guest types in their ticket code.
 2. We look up the matching registration (guest + event details).
 3. We check whether they're allowed to review yet: marked "attended"
    AND the event date has passed. (Admin can flip a testing bypass on
-   the Data Tools page to skip this check while admin_attendance.py --
-   the check-in screen -- isn't built yet.)
+   the Data Tools page to skip this check, for testing without a real
+   checked-in guest on hand.)
 4. If eligible and they haven't already reviewed this event, show the
    rating + text form.
 """

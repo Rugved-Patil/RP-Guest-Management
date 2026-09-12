@@ -81,7 +81,7 @@ def render_sentiment_section():
 
     # sentiment_score is None for any review that hasn't been scored (see
     # the caption below for when that happens) -- pandas stores those as
-    # NaN, and .notna() is how you filter those out before averaging.
+    # NaN, and .notna() filters those out before averaging.
     scored = df[df["sentiment_score"].notna()]
     unscored_count = len(df) - len(scored)
 
@@ -210,7 +210,7 @@ def _risk_level(probability):
     """Turn a 0-1 no-show probability into a plain-English bucket for
     the table below. Thresholds are just reasonable defaults, not
     derived from anything -- tune them if 60%/35% doesn't feel right
-    once you're looking at real predictions."""
+    against real predictions."""
     if probability is None:
         return "Not yet scored"
     if probability >= 0.6:

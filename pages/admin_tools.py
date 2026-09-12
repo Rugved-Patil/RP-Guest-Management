@@ -5,8 +5,8 @@ Admin-only utility page -- not part of the guest-facing flow.
 
 Two tools:
 1. Add sample data: generates a realistic demo dataset (events, guests,
-   registrations, reviews) so the dashboard doesn't look empty while
-   you're building/testing the rest of the app.
+   registrations, reviews) so the dashboard doesn't look empty during
+   development and testing.
 2. Reset all data: wipes everything back to a clean, empty state.
 """
 
@@ -103,17 +103,17 @@ st.divider()
 # ---------------------------------------------------------------------
 st.subheader("Testing settings")
 st.write(
-    "admin_attendance.py (check-in) isn't built yet, so there's currently no "
-    "real way for a registration to end up marked 'attended'. Turn this on "
-    "to let the Leave a Review page skip its normal attended + event-over "
-    "check, so you can test the review form end-to-end in the meantime."
+    "Reviews are normally only open to guests checked in as attended, "
+    "once the event has passed. Turn this on to skip both checks, so "
+    "the review form can be tested without a real past event and a "
+    "checked-in guest on hand."
 )
 
 # Stored in the database (see get_bypass_setting/set_bypass_setting in
-# db.py) rather than st.session_state, so it stays on even if you test
-# the guest review link in a separate browser tab or window -- session
-# state only lives inside one browser session, but this needs to be
-# visible to a completely different "guest" session too.
+# db.py) rather than st.session_state, so it stays on even when the
+# guest review link is tested in a separate browser tab or window --
+# session state only lives inside one browser session, but this needs
+# to be visible to a completely different "guest" session too.
 bypass_enabled = st.checkbox(
     "Bypass review eligibility (testing)",
     value=get_bypass_setting(),
