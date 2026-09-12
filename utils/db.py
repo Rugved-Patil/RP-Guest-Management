@@ -406,6 +406,187 @@ def get_or_create_guest(name, email, phone):
 
 
 # ---------------------------------------------------------------------
+# Duplicate guest merging
+# ---------------------------------------------------------------------
+
+def get_possible_duplicates():
+    """
+    Return one row per flagged guest, paired with the existing guest
+    find_possible_duplicate() thinks they match -- everything
+    admin_manage.py needs to show a side-by-side comparison and let
+    the admin decide.
+
+    A plain (inner) JOIN on purpose: a guest only shows up here while
+    possible_duplicate_of still points at a real guest row. Once a
+    pair is merged or dismissed, it stops appearing on its own --
+    no separate "resolved" flag needed.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT
+            g.guest_id AS flagged_id, g.name AS flagged_name,
+            g.email AS flagged_email, g.phone AS flagged_phone,
+            g.duplicate_match_score,
+            (SELECT COUNT(*) FROM registrations WHERE guest_id = g.guest_id)
+                AS flagged_registrations,
+            o.guest_id AS original_id, o.name AS original_name,
+            o.email AS original_email, o.phone AS original_phone,
+            (SELECT COUNT(*) FROM registrations WHERE guest_id = o.guest_id)
+                AS original_registrations
+        FROM guests g
+        JOIN guests o ON o.guest_id = g.possible_duplicate_of
+        WHERE g.possible_duplicate_of IS NOT NULL
+        ORDER BY g.duplicate_match_score DESC
+    """)
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def dismiss_duplicate_flag(guest_id):
+    """
+    Admin reviewed the flag and decided it's not actually a duplicate --
+    just clear it. The guest stays exactly as-is; nothing about their
+    registrations or reviews changes. If a later registration happens
+    to trip find_possible_duplicate() again, they could get re-flagged
+    (against whatever guest matches at that point), same as any other
+    guest.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE guests SET possible_duplicate_of = NULL, duplicate_match_score = NULL "
+        "WHERE guest_id = ?",
+        (guest_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+# How "complete" each attendance status counts as, for resolving the
+# case where both guests in a merge are registered for the *same*
+# event (see merge_guests() below). Higher wins.
+_ATTENDANCE_COMPLETENESS = {"attended": 3, "no_show": 2, "registered": 1}
+
+
+def merge_guests(flagged_guest_id, original_guest_id):
+    """
+    Merge a flagged guest into the existing guest they were matched
+    against: every one of the flagged guest's registrations and
+    reviews gets moved onto the original guest, then the flagged
+    guest's now-empty row is deleted.
+
+    If both guests are separately registered for the *same* event,
+    moving both registrations over would leave the original guest with
+    two rows for one event -- so instead, whichever registration is
+    more "complete" (attended beats no_show beats a bare registered)
+    is kept, and the other is dropped rather than moved. Reviews can
+    have the same overlap (both guests happened to review the same
+    event); since a review doesn't have a "completeness" to compare,
+    the original guest's review is kept and the flagged guest's is
+    dropped on a tie.
+
+    Foreign keys are ON for this connection (see get_connection()), so
+    every registration and review referencing the flagged guest has to
+    be moved or deleted *before* that guest's row can be deleted --
+    this function does exactly that, in that order. If anything below
+    raises partway through, nothing gets committed (Python's sqlite3
+    only writes to the file on conn.commit(), which only happens once
+    everything succeeds) -- so a merge either fully happens or not at
+    all, never half-done.
+
+    Returns a dict: {"moved_registrations", "resolved_overlaps", "moved_reviews"}
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+
+    flagged_regs = cur.execute(
+        "SELECT * FROM registrations WHERE guest_id = ?", (flagged_guest_id,)
+    ).fetchall()
+    original_event_ids = {
+        row["event_id"] for row in cur.execute(
+            "SELECT event_id FROM registrations WHERE guest_id = ?", (original_guest_id,)
+        ).fetchall()
+    }
+
+    moved_registrations = 0
+    resolved_overlaps = 0
+    for reg in flagged_regs:
+        if reg["event_id"] not in original_event_ids:
+            cur.execute(
+                "UPDATE registrations SET guest_id = ? WHERE registration_id = ?",
+                (original_guest_id, reg["registration_id"]),
+            )
+            moved_registrations += 1
+            continue
+
+        # Overlap: both guests registered for this event. Compare
+        # completeness and keep the better (or original's, on a tie).
+        original_reg = cur.execute(
+            "SELECT * FROM registrations WHERE guest_id = ? AND event_id = ?",
+            (original_guest_id, reg["event_id"]),
+        ).fetchone()
+        flagged_rank = _ATTENDANCE_COMPLETENESS.get(reg["attendance_status"], 0)
+        original_rank = _ATTENDANCE_COMPLETENESS.get(original_reg["attendance_status"], 0)
+
+        if flagged_rank > original_rank:
+            cur.execute(
+                "DELETE FROM registrations WHERE registration_id = ?",
+                (original_reg["registration_id"],),
+            )
+            cur.execute(
+                "UPDATE registrations SET guest_id = ? WHERE registration_id = ?",
+                (original_guest_id, reg["registration_id"]),
+            )
+        else:
+            cur.execute(
+                "DELETE FROM registrations WHERE registration_id = ?",
+                (reg["registration_id"],),
+            )
+        resolved_overlaps += 1
+
+    flagged_reviews = cur.execute(
+        "SELECT * FROM reviews WHERE guest_id = ?", (flagged_guest_id,)
+    ).fetchall()
+    original_review_event_ids = {
+        row["event_id"] for row in cur.execute(
+            "SELECT event_id FROM reviews WHERE guest_id = ?", (original_guest_id,)
+        ).fetchall()
+    }
+
+    moved_reviews = 0
+    for rev in flagged_reviews:
+        if rev["event_id"] in original_review_event_ids:
+            cur.execute("DELETE FROM reviews WHERE review_id = ?", (rev["review_id"],))
+        else:
+            cur.execute(
+                "UPDATE reviews SET guest_id = ? WHERE review_id = ?",
+                (original_guest_id, rev["review_id"]),
+            )
+            moved_reviews += 1
+
+    # Rare, but if some other guest was flagged as a duplicate OF the
+    # flagged guest (not just the other way around), repoint that flag
+    # at the survivor instead of leaving it pointing at a row that's
+    # about to be deleted.
+    cur.execute(
+        "UPDATE guests SET possible_duplicate_of = ? WHERE possible_duplicate_of = ?",
+        (original_guest_id, flagged_guest_id),
+    )
+
+    cur.execute("DELETE FROM guests WHERE guest_id = ?", (flagged_guest_id,))
+
+    conn.commit()
+    conn.close()
+    return {
+        "moved_registrations": moved_registrations,
+        "resolved_overlaps": resolved_overlaps,
+        "moved_reviews": moved_reviews,
+    }
+
+
+# ---------------------------------------------------------------------
 # Registrations
 # ---------------------------------------------------------------------
 

@@ -3,25 +3,103 @@ pages/admin_manage.py
 -----------------------
 Admin-facing page: view every guest's registrations in one table, with
 filtering by event and attendance status, plus a free-text search on
-name/email.
+name/email. Also surfaces guests flagged as possible duplicates
+(see utils/db.py's find_possible_duplicate()) with Merge / Dismiss
+actions.
 
 One row = one registration (a guest + event pairing), not one row per
-guest. Ticket code and attendance status belong to the registration,
-not the guest, so a guest registered for 3 events shows up as 3 rows
-here -- that's what makes "guests registered for a particular event"
-and "ticket code visible" both possible at once.
-
-Editing/merging guest records isn't built yet -- this page is
-view/search/sort only for now.
+guest, in the main table below. Ticket code and attendance status
+belong to the registration, not the guest, so a guest registered for
+3 events shows up as 3 rows here -- that's what makes "guests
+registered for a particular event" and "ticket code visible" both
+possible at once.
 """
 
 import streamlit as st
 from datetime import date, datetime
-from utils.db import init_db, get_all_registrations_detailed, get_all_events
+from utils.db import (
+    init_db,
+    get_all_registrations_detailed,
+    get_all_events,
+    get_possible_duplicates,
+    dismiss_duplicate_flag,
+    merge_guests,
+)
 
 init_db()
 
 st.title("Manage Guests")
+
+# --- Possible duplicate guests -----------------------------------------
+
+duplicate_pairs = get_possible_duplicates()
+
+st.subheader("Possible duplicate guests")
+
+if not duplicate_pairs:
+    st.caption("No possible duplicates flagged right now.")
+else:
+    st.caption(
+        f"{len(duplicate_pairs)} guest(s) flagged as a likely match for an "
+        "existing guest at registration time. Review each pair below."
+    )
+    for pair in duplicate_pairs:
+        flagged_id = pair["flagged_id"]
+        confirm_key = f"confirm_merge_{flagged_id}"
+        if confirm_key not in st.session_state:
+            st.session_state[confirm_key] = False
+
+        with st.container(border=True):
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.markdown(f"**New registration:** {pair['flagged_name']}")
+                st.caption(
+                    f"{pair['flagged_email']} · {pair['flagged_phone'] or '--'} · "
+                    f"{pair['flagged_registrations']} registration(s)"
+                )
+            with col_b:
+                st.markdown(f"**Existing guest:** {pair['original_name']} (#{pair['original_id']})")
+                st.caption(
+                    f"{pair['original_email']} · {pair['original_phone'] or '--'} · "
+                    f"{pair['original_registrations']} registration(s)"
+                )
+            st.caption(f"Name match score: {pair['duplicate_match_score']}%")
+
+            if not st.session_state[confirm_key]:
+                merge_col, dismiss_col = st.columns(2)
+                with merge_col:
+                    if st.button("Merge into existing guest", key=f"merge_btn_{flagged_id}"):
+                        st.session_state[confirm_key] = True
+                        st.rerun()
+                with dismiss_col:
+                    if st.button("Dismiss (not a duplicate)", key=f"dismiss_btn_{flagged_id}"):
+                        dismiss_duplicate_flag(flagged_id)
+                        st.success(f"Dismissed -- {pair['flagged_name']} is no longer flagged.")
+                        st.rerun()
+            else:
+                st.warning(
+                    f"This moves all of {pair['flagged_name']}'s registrations and "
+                    f"reviews onto {pair['original_name']} (#{pair['original_id']}), "
+                    "then deletes this guest record. This cannot be undone."
+                )
+                confirm_col, cancel_col = st.columns(2)
+                with confirm_col:
+                    if st.button("Yes, merge", key=f"confirm_merge_btn_{flagged_id}", type="primary"):
+                        result = merge_guests(flagged_id, pair["original_id"])
+                        st.session_state[confirm_key] = False
+                        st.success(
+                            f"Merged. Moved {result['moved_registrations']} "
+                            f"registration(s) ({result['resolved_overlaps']} overlapping "
+                            f"event(s) auto-resolved) and {result['moved_reviews']} "
+                            f"review(s) onto {pair['original_name']}."
+                        )
+                        st.rerun()
+                with cancel_col:
+                    if st.button("Cancel", key=f"cancel_merge_btn_{flagged_id}"):
+                        st.session_state[confirm_key] = False
+                        st.rerun()
+
+st.divider()
 
 registrations = get_all_registrations_detailed()
 
