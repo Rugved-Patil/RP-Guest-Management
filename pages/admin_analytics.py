@@ -2,15 +2,21 @@
 pages/admin_analytics.py
 --------------------------
 Admin-facing page: sentiment analysis on guest reviews, no-show risk
-prediction, guest segmentation, and turnout forecasting.
+prediction, guest segmentation, a standalone attendance-rate-over-time
+trend, and turnout forecasting.
 
-All four sections work the same basic way: a model in utils/ml.py
-turns raw data into a number, and this page charts/tables it.
-Sentiment scores get computed elsewhere (at review submission, or
+The first four sections work the same basic way: a model in
+utils/ml.py turns raw data into a number, and this page charts/tables
+it. Sentiment scores get computed elsewhere (at review submission, or
 during sample data seeding) and this page just reads them. No-show
 predictions, guest segments, and turnout forecasts, on the other hand,
 are trained and scored right here, on demand, via their "Run..."
 buttons below.
+
+The attendance-rate-over-time section is different -- no model, no
+"Run" button. It just charts attended/registered per past event
+straight from the database, the same historical numbers the turnout
+forecast trains on, without the forecast line mixed in.
 """
 
 import streamlit as st
@@ -435,6 +441,59 @@ def render_segmentation_section():
     st.dataframe(display_rows, use_container_width=True)
 
 
+def render_attendance_trend_section():
+    st.header("Attendance rate over time")
+    st.write(
+        "Attended divided by registered, for every past event with a "
+        "known outcome, plotted in chronological order. This is the "
+        "same historical numbers the turnout forecast below trains on "
+        "-- shown on their own, with no model or forecast line mixed "
+        "in."
+    )
+
+    # Reuses the same query the turnout forecast trains on (already
+    # imported above) -- no need for a second db.py function just to
+    # look at the same rows a different way.
+    event_rows = get_events_for_forecast()
+    resolved_rows = [e for e in event_rows if _is_resolved_event(e)]
+
+    if not resolved_rows:
+        st.info(
+            "No fully-resolved past events yet -- once every "
+            "registration for an event is checked in or marked "
+            "no-show, that event will show up here."
+        )
+        return
+
+    rows = []
+    for e in resolved_rows:
+        rows.append({
+            "event_name": e["event_name"],
+            "event_date": e["event_date"],
+            "tag": e["tag"] or "--",
+            "registered": e["registered_count"],
+            "attended": e["attended_count"],
+            "rate": e["attended_count"] / e["registered_count"],
+        })
+    df = pd.DataFrame(rows).sort_values("event_date")
+    df["label"] = df.apply(
+        lambda row: f"{row['event_name']} ({date.fromisoformat(row['event_date']).strftime('%d-%m-%Y')})",
+        axis=1,
+    )
+
+    kpi1, kpi2 = st.columns(2)
+    kpi1.metric("Resolved events", len(df))
+    kpi2.metric("Average attendance rate", f"{df['rate'].mean() * 100:.0f}%")
+
+    fig_trend = px.line(
+        df, x="label", y="rate", markers=True,
+        hover_data={"tag": True, "registered": True, "attended": True},
+        labels={"rate": "Attendance rate", "label": "Event", "tag": "Tag"},
+    )
+    fig_trend.update_layout(xaxis_tickangle=-30, yaxis_tickformat=".0%")
+    st.plotly_chart(fig_trend, use_container_width=True)
+
+
 def render_turnout_section():
     st.header("Turnout forecast")
     st.write(
@@ -567,5 +626,7 @@ st.divider()
 render_noshow_section()
 st.divider()
 render_segmentation_section()
+st.divider()
+render_attendance_trend_section()
 st.divider()
 render_turnout_section()
