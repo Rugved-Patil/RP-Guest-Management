@@ -43,32 +43,47 @@ Streamlit for the UI (native `st.Page` and `st.navigation`), SQLite for storage,
 
 ```
 RP-Guest-Management/
-├── app.py                    # entry point, sets up navigation
+├── app.py                    # entry point: login gate + role-based navigation
 ├── pages/
 │   ├── admin_events.py       # admin: create events
-│   ├── register.py           # guest facing: registration form
-│   ├── review.py             # guest facing: post-event review form
 │   ├── admin_manage.py       # admin: view/search/edit guests, duplicate merge/dismiss
 │   ├── admin_attendance.py   # admin: ticket check-in
 │   ├── admin_analytics.py    # admin: sentiment, no-show, segmentation, forecasting
-│   └── admin_tools.py        # admin: sample data seeder and reset
+│   ├── admin_tools.py        # admin: sample data seeder and reset
+│   ├── organizer_home.py     # organizer: placeholder (real views coming next)
+│   ├── register.py           # guest facing: registration form
+│   └── review.py             # guest facing: post-event review form
 ├── data/
 │   └── guest_dashboard.db    # SQLite database
 ├── utils/
 │   ├── db.py                 # all data-access functions
+│   ├── auth.py                # login/session helpers, role-gating
 │   └── ml.py                 # clustering, prediction, sentiment, forecasting logic
 └── requirements.txt
 ```
 
-`utils/ml.py` never imports `utils/db.py`, to avoid a circular import. ML functions just take data in as plain arguments and hand back results, so there's no dependency loop. `db.py` is the only file that imports `ml.py`.
+`utils/ml.py` never imports `utils/db.py`, to avoid a circular import. ML functions just take data in as plain arguments and hand back results, so there's no dependency loop. `db.py` is the only file that imports `ml.py`. `utils/auth.py` sits above `db.py` and provides login/session logic to every page.
+
+## Login
+
+Three roles: **Admin** (full access), **Organizer** (placeholder for now -- scoped event views are next), and **Guest** (Register/Review pages). Accounts are pre-loaded into the database automatically the first time the app runs -- there's no signup form. Every account shares the same demo password.
+
+| Role | Username | Password |
+|---|---|---|
+| Admin | `admin` | `password123` |
+| Organizer | `organizer1` ... `organizer7` | `password123` |
+| Guest | `guest1` ... `guest25` | `password123` |
+
+This is plain-text, shared-password auth, which is fine for a local demo but not how a real system would do it -- see Known limitations below.
 
 ## Data model
 
-Four linked SQLite tables:
+Five linked SQLite tables:
 - **Guests**: persistent guest profiles, reused across events
 - **Events**: one row per event
 - **Registrations**: links a guest to a specific event, holds the ticket code, check-in time, attendance status, and no-show prediction
 - **Reviews**: tied to a specific registration, only exists for guests marked attended
+- **Users**: login accounts for the role system (Admin / Organizer / Guest)
 
 ## Setup
 
@@ -91,11 +106,12 @@ Four linked SQLite tables:
 
 The database gets created and migrated automatically the first time you run the app. If you'd rather not enter everything by hand, the Data Tools page has a sample data seeder that fills it with realistic demo data.
 
-## Known limitations (v1)
+## Known limitations
 
-A few things are left out on purpose for this version, not things that got missed:
-- No login or user accounts, the app is single-session with no roles
-- No authentication or access control
+A few things are left out on purpose, not things that got missed:
+- Passwords are plain text and shared across every account of a given role -- fine for a local demo, not something a real system would ever do
+- No signup flow -- accounts are pre-loaded only, matching the v2 plan's "pre-loaded accounts, no self-registration" decision
+- Role-gating relies on which pages get handed to `st.navigation()` for the current role, plus a same-purpose check at the top of each page (see `require_role()` in `utils/auth.py`) -- not real security, just enough to keep each role looking at the right thing in a local demo
 - No automated email or QR delivery, ticket codes are shown on screen and shared manually
 - Check-in is typed-code only, no camera-based QR scanning
 - No payment or booking integration
@@ -103,4 +119,4 @@ A few things are left out on purpose for this version, not things that got misse
 
 ## Roadmap
 
-Next up is a v2 branch that adds a login system with three access levels (Admin, Organizer, Guest), scopes event management and analytics to whichever organizer created the event, and turns guest registration into a logged-in, self-service flow. QR-based check-in might come after that.
+Login shell and role-gated navigation (Admin / Organizer / Guest) are in place. Next up: event ownership (`events.created_by`) and real Organizer views scoped to their own events, then turning guest registration into a logged-in, self-service flow (browse/register/cancel), then QR-based check-in.
