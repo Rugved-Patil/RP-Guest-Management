@@ -31,8 +31,10 @@ from utils.db import (
     update_guest,
     delete_registration,
 )
+from utils.auth import require_role
 
 init_db()
+require_role("admin")
 
 st.title("Manage Guests")
 

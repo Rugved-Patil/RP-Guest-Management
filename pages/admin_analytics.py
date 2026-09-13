@@ -43,8 +43,10 @@ from utils.ml import (
     MIN_TRAINING_EVENTS,
     _is_resolved_event,
 )
+from utils.auth import require_role
 
 init_db()
+require_role("admin")
 
 st.title("Analytics")
 

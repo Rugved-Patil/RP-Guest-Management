@@ -15,8 +15,10 @@ from utils.db import (
     init_db, get_table_counts, reset_all_data, seed_sample_data,
     get_bypass_setting, set_bypass_setting,
 )
+from utils.auth import require_role
 
 init_db()
+require_role("admin")
 
 st.title("Data Tools")
 st.caption("Admin-only utilities for demoing and testing -- not something a guest would ever see.")

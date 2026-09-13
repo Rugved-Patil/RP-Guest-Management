@@ -30,8 +30,10 @@ from utils.db import (
     add_review,
 )
 from utils.ml import score_sentiment
+from utils.auth import require_role
 
 init_db()
+require_role("guest")
 
 st.title("Leave a Review")
 st.write("Enter the ticket code you received when you registered.")

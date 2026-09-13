@@ -24,8 +24,10 @@ from utils.db import (
     add_registration,
     has_registration,
 )
+from utils.auth import require_role
 
 init_db()
+require_role("guest")
 
 st.title("Event Registration")
 

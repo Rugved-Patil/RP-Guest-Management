@@ -12,8 +12,10 @@ built here (per the scope doc).
 import streamlit as st
 from datetime import datetime
 from utils.db import init_db, mark_attendance_by_ticket
+from utils.auth import require_role
 
 init_db()
+require_role("admin")
 
 st.title("Check-In")
 st.write("Enter the guest's ticket code and check them in.")

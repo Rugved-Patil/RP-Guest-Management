@@ -33,6 +33,12 @@ DUPLICATE_MATCH_THRESHOLD = 85
 # The .db file will live in the data/ folder, next to this file's project root.
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "guest_dashboard.db"
 
+# Shared demo password for every pre-loaded account (see
+# _seed_default_users() below). Plain text on purpose for this
+# portfolio project -- a real system would hash it (e.g. with
+# bcrypt) and never store or compare it directly like this.
+DEMO_PASSWORD = "password123"
+
 
 def get_connection():
     """
@@ -118,6 +124,59 @@ def _ensure_guests_columns(conn):
     conn.commit()
 
 
+def _seed_default_users(conn):
+    """
+    Insert a fixed set of demo login accounts the first time this
+    runs: one Admin, several Organizers, and a pool of Guests. This is
+    what "pre-loaded accounts only, no self-registration" (the v2
+    plan) actually looks like in the database -- there's no signup
+    form anywhere, so without this a fresh clone of the project would
+    have a users table with nothing in it and nobody could log in.
+
+    Every account shares the same demo password (see DEMO_PASSWORD
+    below), which is fine for a local portfolio project but is
+    exactly the kind of thing worth calling out as unrealistic if this
+    comes up in an interview -- a real system would give each account
+    its own password and never store it as plain text (see the note
+    on DEMO_PASSWORD).
+
+    Only runs once: if the users table already has any rows at all,
+    this does nothing, so usernames/passwords/roles edited by hand
+    later don't get silently overwritten every time the app starts --
+    same "only touch it if it's empty" idea as seed_sample_data() is
+    meant to be run deliberately, except this one runs automatically
+    since the app can't function at all without at least one account.
+    """
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM users")
+    if cur.fetchone()[0] > 0:
+        return
+
+    accounts = [("admin", DEMO_PASSWORD, "admin", "Admin")]
+
+    organizer_names = [
+        "Priya Shah", "Karan Mehta", "Neha Bhatt", "Rohan Desai",
+        "Simran Kaur", "Arjun Malhotra", "Divya Rao",
+    ]
+    for i, name in enumerate(organizer_names, start=1):
+        accounts.append((f"organizer{i}", DEMO_PASSWORD, "organizer", name))
+
+    # Reuses the same name pools seed_sample_data() draws on below, so
+    # these read as plausible people rather than "Guest 1", "Guest 2".
+    for i in range(1, 26):
+        name = f"{random.choice(_FIRST_NAMES)} {random.choice(_LAST_NAMES)}"
+        accounts.append((f"guest{i}", DEMO_PASSWORD, "guest", name))
+
+    cur.executemany(
+        """
+        INSERT INTO users (username, password, role, display_name)
+        VALUES (?, ?, ?, ?)
+        """,
+        accounts,
+    )
+    conn.commit()
+
+
 def init_db():
     """
     Create all four tables if they don't already exist, and make sure
@@ -191,6 +250,22 @@ def init_db():
         )
     """)
 
+    # Login accounts for the v2 role system (Admin / Organizer / Guest).
+    # Deliberately separate from the guests table -- a "guest" login
+    # account here is just something a person types a username/password
+    # into to reach the Register/Review pages; it isn't linked to any
+    # particular row in guests (that table still only fills in once
+    # someone actually registers for an event, same as before).
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE,
+            password TEXT NOT NULL,
+            role TEXT NOT NULL,
+            display_name TEXT NOT NULL
+        )
+    """)
+
     conn.commit()
 
     # Handles the case where events/guests/reviews already existed before this update.
@@ -198,7 +273,31 @@ def init_db():
     _ensure_guests_columns(conn)
     _ensure_reviews_columns(conn)
 
+    # Populates the users table with demo accounts the first time it's
+    # empty -- see _seed_default_users() above for why this runs
+    # automatically rather than needing a manual seeding step.
+    _seed_default_users(conn)
+
     conn.close()
+
+
+# ---------------------------------------------------------------------
+# Users (login accounts)
+# ---------------------------------------------------------------------
+
+def get_user_by_username(username):
+    """
+    Look up a login account by username. Returns None if no account
+    has that username -- utils/auth.py treats that the same as a
+    wrong password, so a login attempt doesn't reveal whether the
+    username itself exists.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE username = ?", (username,))
+    row = cur.fetchone()
+    conn.close()
+    return row
 
 
 # ---------------------------------------------------------------------
