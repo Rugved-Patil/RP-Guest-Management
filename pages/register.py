@@ -6,24 +6,43 @@ Guest-facing page: book a spot at an event.
 Flow: guest picks an event, fills in their details, submits.
 On success, we look them up (or create them) as a Guest, create a
 Registration row, and show them their ticket code.
+
+Only events that haven't happened yet are offered here (see the date
+filter below) -- get_all_events() itself returns every event ever
+created, since other pages (Manage Guests, Analytics) need to see past
+ones too. A guest who's already registered for the event they pick is
+stopped before a second registration gets created; see
+has_registration() in utils/db.py.
 """
 
 import streamlit as st
-from utils.db import init_db, get_all_events, get_or_create_guest, add_registration
+from datetime import date
+from utils.db import (
+    init_db,
+    get_all_events,
+    get_or_create_guest,
+    add_registration,
+    has_registration,
+)
 
 init_db()
 
 st.title("Event Registration")
 
 events = get_all_events()
+events = [e for e in events if date.fromisoformat(e["event_date"]) >= date.today()]
 
 if not events:
     st.warning("There are no events open for registration yet. Check back soon.")
     st.stop()  # Stops the page here -- no point showing a form with no events.
 
-# Build a simple label like "Product Launch -- 2026-09-20" for each event,
-# and keep a lookup back to the real event_id for when we save.
-event_options = {f"{e['event_name']} -- {e['event_date']}": e["event_id"] for e in events}
+# Build a simple label like "Movie Premiere Night -- 20-09-2026" for each
+# event (same dd-mm-yyyy format used on every other page), and keep a
+# lookup back to the real event_id for when we save.
+def _event_label(e):
+    return f"{e['event_name']} -- {date.fromisoformat(e['event_date']).strftime('%d-%m-%Y')}"
+
+event_options = {_event_label(e): e["event_id"] for e in events}
 
 with st.form("register_form"):
     selected_label = st.selectbox("Which event are you registering for?", list(event_options.keys()))
@@ -45,8 +64,15 @@ with st.form("register_form"):
             # different regardless of which path it takes.
             guest_id = get_or_create_guest(name.strip(), email.strip(), phone.strip())
 
-            ticket_code = add_registration(guest_id, event_id)
+            if has_registration(guest_id, event_id):
+                st.warning(
+                    "You're already registered for this event -- check "
+                    "your earlier confirmation for your ticket code. "
+                    "Registering again won't create a second one."
+                )
+            else:
+                ticket_code = add_registration(guest_id, event_id)
 
-            st.success("You're registered! Save your ticket code below.")
-            st.metric("Your ticket code", ticket_code)
-            st.caption("You'll need this code for check-in at the event.")
+                st.success("You're registered! Save your ticket code below.")
+                st.metric("Your ticket code", ticket_code)
+                st.caption("You'll need this code for check-in at the event.")

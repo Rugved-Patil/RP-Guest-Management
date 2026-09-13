@@ -3,16 +3,20 @@ pages/admin_manage.py
 -----------------------
 Admin-facing page: view every guest's registrations in one table, with
 filtering by event and attendance status, plus a free-text search on
-name/email. Also surfaces guests flagged as possible duplicates
-(see utils/db.py's find_possible_duplicate()) with Merge / Dismiss
-actions.
+name/email. Below that, pick any one registration to edit the guest's
+details or delete the registration outright. Also surfaces guests
+flagged as possible duplicates (see utils/db.py's
+find_possible_duplicate()) with Merge / Dismiss actions.
 
 One row = one registration (a guest + event pairing), not one row per
 guest, in the main table below. Ticket code and attendance status
 belong to the registration, not the guest, so a guest registered for
 3 events shows up as 3 rows here -- that's what makes "guests
 registered for a particular event" and "ticket code visible" both
-possible at once.
+possible at once. The same is true of the edit/delete section: editing
+a guest's details there affects them everywhere, since guests are
+shared across events, but deleting only removes the one selected
+registration.
 """
 
 import streamlit as st
@@ -24,6 +28,8 @@ from utils.db import (
     get_possible_duplicates,
     dismiss_duplicate_flag,
     merge_guests,
+    update_guest,
+    delete_registration,
 )
 
 init_db()
@@ -108,6 +114,89 @@ for r in filtered:
 # st.dataframe supports sorting by clicking a column header out of the
 # box -- no extra sorting code needed here for that.
 st.dataframe(display_rows, use_container_width=True)
+
+st.divider()
+
+# --- Edit or delete a registration --------------------------------------
+
+st.subheader("Edit or delete a registration")
+
+if not filtered:
+    st.caption("No registrations match the filters above to edit or delete.")
+else:
+    def _registration_label(r):
+        return f"{r['guest_name']} -- {r['event_name']} ({r['ticket_code']})"
+
+    registration_by_label = {_registration_label(r): r for r in filtered}
+    selected_label = st.selectbox(
+        "Select a registration", list(registration_by_label.keys())
+    )
+    selected = registration_by_label[selected_label]
+
+    edit_col, delete_col = st.columns(2)
+
+    with edit_col:
+        st.markdown("**Edit guest details**")
+        st.caption(
+            "Guests are shared across every event they're registered "
+            "for, so this updates their name/email/phone everywhere -- "
+            "not just on this one registration."
+        )
+        with st.form(f"edit_guest_form_{selected['guest_id']}"):
+            edit_name = st.text_input("Name", value=selected["guest_name"])
+            edit_email = st.text_input("Email", value=selected["email"])
+            edit_phone = st.text_input("Phone", value=selected["phone"] or "")
+            save_clicked = st.form_submit_button("Save changes")
+
+            if save_clicked:
+                if not edit_name.strip() or not edit_email.strip():
+                    st.error("Name and email are required.")
+                else:
+                    update_guest(
+                        selected["guest_id"],
+                        edit_name.strip(),
+                        edit_email.strip(),
+                        edit_phone.strip(),
+                    )
+                    st.success(f"Updated {edit_name.strip()}'s details.")
+                    st.rerun()
+
+    with delete_col:
+        st.markdown("**Delete this registration**")
+        st.caption(
+            "Removes just this one guest + event registration (and its "
+            "review, if any) -- not the guest's other registrations, "
+            "and not the guest record itself."
+        )
+        delete_key = f"confirm_delete_reg_{selected['registration_id']}"
+        if delete_key not in st.session_state:
+            st.session_state[delete_key] = False
+
+        if not st.session_state[delete_key]:
+            if st.button("Delete registration", key=f"delete_btn_{selected['registration_id']}"):
+                st.session_state[delete_key] = True
+                st.rerun()
+        else:
+            st.warning(
+                f"This permanently deletes {selected['guest_name']}'s "
+                f"registration for {selected['event_name']} "
+                f"(ticket {selected['ticket_code']}). This cannot be undone."
+            )
+            confirm_col, cancel_col = st.columns(2)
+            with confirm_col:
+                if st.button(
+                    "Yes, delete",
+                    key=f"confirm_delete_btn_{selected['registration_id']}",
+                    type="primary",
+                ):
+                    delete_registration(selected["registration_id"])
+                    st.session_state[delete_key] = False
+                    st.success("Registration deleted.")
+                    st.rerun()
+            with cancel_col:
+                if st.button("Cancel", key=f"cancel_delete_btn_{selected['registration_id']}"):
+                    st.session_state[delete_key] = False
+                    st.rerun()
 
 st.divider()
 

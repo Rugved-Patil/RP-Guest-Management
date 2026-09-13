@@ -1,0 +1,25 @@
+# Byte-compiled files
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+venv/
+env/
+.venv/
+ENV/
+
+# Environment variables / secrets
+.env
+.streamlit/secrets.toml
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Note: data/guest_dashboard.db is intentionally NOT ignored -- it ships
+# pre-seeded with sample data so the app has something to show right after
+# a clone, with no setup step required. Add it here if you'd rather ship
+# an empty database and have people seed it themselves from the Data
+# Tools page.

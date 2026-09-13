@@ -311,6 +311,27 @@ def add_guest(name, email, phone, possible_duplicate_of=None, duplicate_match_sc
     return guest_id
 
 
+def update_guest(guest_id, name, email, phone):
+    """
+    Update a guest's name, email, and phone in place. Used by the
+    "Edit" action on the Manage Guests page.
+
+    Guests are shared across every event they're registered for (see
+    the data model notes in the scope doc), so this changes their
+    details everywhere at once -- not just on whichever registration
+    row the edit was opened from. The calling page is responsible for
+    making that clear to the admin.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE guests SET name = ?, email = ?, phone = ? WHERE guest_id = ?",
+        (name, email, phone, guest_id),
+    )
+    conn.commit()
+    conn.close()
+
+
 def _normalize_name_for_matching(name):
     """
     Lowercase a name and sort its words alphabetically.
@@ -591,6 +612,19 @@ def merge_guests(flagged_guest_id, original_guest_id):
 # Registrations
 # ---------------------------------------------------------------------
 
+def has_registration(guest_id, event_id):
+    """True if this guest already has a registration for this event."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT 1 FROM registrations WHERE guest_id = ? AND event_id = ?",
+        (guest_id, event_id),
+    )
+    exists = cur.fetchone() is not None
+    conn.close()
+    return exists
+
+
 def _generate_ticket_code(length=5):
     """
     Build a random ticket code like 'LPT43' -- uppercase letters + digits.
@@ -673,6 +707,49 @@ def get_registration_by_ticket(ticket_code):
     row = cur.fetchone()
     conn.close()
     return row
+
+
+def delete_registration(registration_id):
+    """
+    Delete a single registration -- used by the "Delete" action on the
+    Manage Guests page, e.g. to correct a mistaken booking or honor a
+    cancellation. Only removes this one guest+event registration, not
+    the guest's other registrations or the guest record itself.
+
+    Also deletes any review tied to the same guest+event pair, if one
+    exists. Reviews are stored against (guest_id, event_id) rather
+    than registration_id (see add_review()), so without this a review
+    could otherwise outlive the registration it was written for --
+    has_review()/is_review_eligible() both assume a review only exists
+    because a registration for it once did.
+
+    Unlike delete_event(), there's no "blocked" case here -- deleting
+    a registration is meant to always be possible regardless of its
+    attendance_status. Returns True if a matching registration was
+    found and deleted, False if registration_id didn't exist.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+
+    reg = cur.execute(
+        "SELECT guest_id, event_id FROM registrations WHERE registration_id = ?",
+        (registration_id,),
+    ).fetchone()
+    if reg is None:
+        conn.close()
+        return False
+
+    cur.execute(
+        "DELETE FROM reviews WHERE guest_id = ? AND event_id = ?",
+        (reg["guest_id"], reg["event_id"]),
+    )
+    cur.execute(
+        "DELETE FROM registrations WHERE registration_id = ?",
+        (registration_id,),
+    )
+    conn.commit()
+    conn.close()
+    return True
 
 
 # ---------------------------------------------------------------------
