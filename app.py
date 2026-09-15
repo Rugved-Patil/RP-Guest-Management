@@ -6,12 +6,8 @@ init_db()
 
 st.set_page_config(page_title="RP Guest Management", page_icon="🎟️")
 
-# Nobody's logged in yet: show only a login form and stop the script
-# here. st.navigation() never gets called in this branch, so there's
-# no sidebar menu and nothing to click into until login succeeds --
-# see the note in utils/auth.py's require_role() docstring for what
-# this does and doesn't protect against.
-if not is_logged_in():
+
+def render_login():
     st.title("RP Guest Management")
     st.caption("Log in to continue.")
 
@@ -26,6 +22,34 @@ if not is_logged_in():
             else:
                 st.error("Incorrect username or password.")
 
+
+# Nobody's logged in yet: route to a single "page" that's really just
+# the login form above, instead of skipping st.navigation() entirely.
+#
+# This matters more than it looks like it should. Per Streamlit's own
+# docs: "As soon as any session of your app executes the st.navigation
+# command, your app will ignore the pages/ directory." In other words,
+# st.navigation() isn't just "the thing that draws the menu" -- calling
+# it at all is what tells Streamlit to stop auto-listing every file
+# under pages/ in the sidebar. The earlier version of this file only
+# called st.navigation() in the "logged in" branch below, and showed
+# the login form + st.stop() before ever reaching it -- so on every run
+# where nobody was logged in (first load, and right after logging out),
+# Streamlit had never been told to stop its own default behavior, and
+# fell back to listing every single page it could find in pages/,
+# regardless of role or login state.
+#
+# Wrapping the login form as its own st.Page and always calling
+# st.navigation() -- logged in or not -- means Streamlit is under
+# explicit control on every single run, so that fallback never
+# triggers. position="hidden" is redundant here in current Streamlit
+# versions (a single-page list already hides the nav widget on its
+# own), but it's left in on purpose to say clearly, in the code, that
+# no menu should ever show on this screen.
+if not is_logged_in():
+    login_page = st.Page(render_login, title="Log In")
+    pg = st.navigation([login_page], position="hidden")
+    pg.run()
     st.stop()
 
 # Logged in: wrap each file as a "page" Streamlit understands.

@@ -353,6 +353,29 @@ def get_user_by_username(username):
     return row
 
 
+def get_users_by_role(role):
+    """
+    Every user account with a given role, full rows -- e.g.
+    get_users_by_role("guest") to get each guest account's username
+    and display_name, not just their user_id.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE role = ?", (role,))
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def get_user_ids_by_role(role):
+    """
+    Every user_id with a given role, e.g. get_user_ids_by_role("organizer").
+    Used by seed_sample_data() to spread generated sample events across
+    real Admin/Organizer accounts instead of leaving created_by unset.
+    """
+    return [user["user_id"] for user in get_users_by_role(role)]
+
+
 # ---------------------------------------------------------------------
 # Events
 # ---------------------------------------------------------------------
@@ -1504,10 +1527,13 @@ def _make_similar_name(name):
 def seed_sample_data():
     """
     Populate the database with a realistic-looking demo dataset:
-    10-20 events spread across the past and future, a pool of guests
-    registered across them, a believable mix of attended/no-show
-    outcomes for past events, and reviews (with sentiment scores) from
-    some of the guests who attended.
+    10-20 events spread across the past and future (owned by a random
+    mix of Admin and every Organizer account, so each role's scoped
+    views have something to show right away), the 25 pre-loaded guest
+    accounts registered across them (plus a handful of extra synthetic
+    guests for duplicate-detection testing), a believable mix of
+    attended/no-show outcomes for past events, and reviews (with
+    sentiment scores) from some of the guests who attended.
 
     Safe to call more than once -- it adds on top of whatever's
     already there rather than replacing it. Use reset_all_data() first
@@ -1530,6 +1556,16 @@ def seed_sample_data():
     num_events = random.randint(10, 20)
     events = []  # list of (event_id, event_date, is_past)
 
+    # Spread generated events across every real account that's allowed
+    # to own one -- Admin plus every Organizer -- instead of leaving
+    # created_by unset (which add_event() doesn't allow) or dumping
+    # everything on one account. This is also what makes the sample
+    # data actually useful for testing the Organizer pages: right
+    # after seeding, each Organizer account already has a realistic
+    # mix of their own past and upcoming events to look at, rather
+    # than needing to create events by hand first.
+    possible_owners = get_user_ids_by_role("admin") + get_user_ids_by_role("organizer")
+
     for _ in range(num_events):
         tag = random.choice(list(_EVENT_NAMES_BY_TAG.keys()))
         name = random.choice(_EVENT_NAMES_BY_TAG[tag])
@@ -1539,33 +1575,63 @@ def seed_sample_data():
         start_time = f"{start_hour:02d}:{start_minute:02d}"
         end_hour = min(start_hour + random.randint(1, 3), 23)
         end_time = f"{end_hour:02d}:{start_minute:02d}"
+        owner_id = random.choice(possible_owners)
 
-        event_id = add_event(name, event_date.isoformat(), start_time, end_time, tag)
+        event_id = add_event(name, event_date.isoformat(), start_time, end_time, tag, created_by=owner_id)
         events.append((event_id, event_date, event_date < today, tag))
         added["events"] += 1
 
-    # --- Guests: a pool of fresh names, plus a handful of deliberate
-    # near-duplicates so the fuzzy-match flagging has something to
-    # catch in the sample data too. ---
-    num_guests = random.randint(25, 35)
+    # --- Guests -------------------------------------------------------
+    # The core guest pool is the 25 pre-loaded guest login accounts
+    # themselves (see _seed_default_users() above) -- each one's
+    # display_name becomes a guest's name, matched to a stable, derived
+    # email (username@example.com). That's deliberate: it means logging
+    # in as, say, guest14 and looking at the sample data shows someone
+    # who's actually registered for and reviewed real events, instead of
+    # a name from a completely disconnected random pool -- useful for
+    # testing even before Step 3 (guest self-service) builds a real,
+    # structural link between a login account and its registration
+    # history. The stable email also means calling this more than once
+    # keeps matching the same 25 guest rows via get_or_create_guest()'s
+    # exact-email match, rather than creating duplicates each time.
+    #
+    # A handful of extra, fully synthetic guests (including a few
+    # deliberate near-duplicates) are layered on top of that core 25, so
+    # fuzzy duplicate-detection still has something to catch -- the 25
+    # fixed accounts alone can't provide that, since their names never
+    # change between runs.
+    guest_login_accounts = get_users_by_role("guest")
     guest_ids = []
     generated_names = []
 
-    for i in range(num_guests):
-        # Every ~8th guest is a near-duplicate of an earlier one instead
-        # of a fresh name, once there's at least one name to riff on.
-        if generated_names and i % 8 == 7:
+    for account in guest_login_accounts:
+        email = f"{account['username']}@example.com"
+        phone = f"9{random.randint(100000000, 999999999)}"
+        guest_id = get_or_create_guest(account["display_name"], email, phone)
+        guest_ids.append(guest_id)
+        generated_names.append(account["display_name"])
+        added["guests"] += 1
+
+    num_extra_guests = random.randint(6, 10)
+
+    for i in range(num_extra_guests):
+        # Every ~3rd extra guest is a near-duplicate of an existing name
+        # (one of the 25 accounts, or an earlier extra) instead of a
+        # fresh one.
+        if generated_names and i % 3 == 2:
             name = _make_similar_name(random.choice(generated_names))
         else:
             name = f"{random.choice(_FIRST_NAMES)} {random.choice(_LAST_NAMES)}"
             generated_names.append(name)
 
-        email = f"{name.lower().replace(' ', '.')}{i}@example.com"
+        email = f"{name.lower().replace(' ', '.')}{i}.extra@example.com"
         phone = f"9{random.randint(100000000, 999999999)}"
 
         guest_id = get_or_create_guest(name, email, phone)
         guest_ids.append(guest_id)
         added["guests"] += 1
+
+    num_guests = len(guest_ids)
 
     # Each guest gets a hidden "reliability" -- their personal tendency
     # to actually show up -- used below to decide attended/no_show for
