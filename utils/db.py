@@ -39,6 +39,19 @@ DB_PATH = Path(__file__).resolve().parent.parent / "data" / "guest_dashboard.db"
 # bcrypt) and never store or compare it directly like this.
 DEMO_PASSWORD = "password123"
 
+# Fixed set of event categories, usable by whoever is creating an
+# event (Admin or Organizer). Lives here rather than in one of the
+# page files because it's not just a UI dropdown -- it directly feeds
+# the one-hot features utils/ml.py's no-show and turnout-forecasting
+# models train on. Now that two different pages create events, having
+# a single shared copy matters more than it used to: if each page
+# defined its own list, they could quietly drift apart (say, an
+# Organizer's version gaining a tag Admin's doesn't have), which would
+# make the ML feature set inconsistent depending on who created the
+# event. Adding a tag here changes what both pages offer *and* what
+# both models train on.
+TAG_OPTIONS = ["Movie", "Play", "Sports", "Dance"]
+
 
 def get_connection():
     """
@@ -59,14 +72,26 @@ def get_connection():
 def _ensure_events_columns(conn):
     """
     Migration helper: if the events table already existed from before
-    start_time/end_time/tag were added (e.g. from an earlier version
-    of this app), add the missing columns onto it instead of silently
-    ignoring them.
+    start_time/end_time/tag/created_by were added (e.g. from an
+    earlier version of this app), add the missing columns onto it
+    instead of silently ignoring them.
 
     SQLite's ALTER TABLE can only add one column at a time, and can't
     add a NOT NULL column without a default value on an existing table,
     so these are added as nullable -- old rows just get empty values
-    for them, which the UI displays as "--".
+    for them, which the UI displays as "--". created_by is the one
+    exception that gets backfilled (see below) rather than left empty.
+
+    One SQLite quirk worth knowing: the FOREIGN KEY (created_by)
+    REFERENCES users declared in the CREATE TABLE above only actually
+    gets enforced on databases created fresh with that line already in
+    place. Adding the column afterwards via ALTER TABLE, like this
+    function does for an existing database, adds the column but not
+    the constraint -- SQLite doesn't support retroactively attaching
+    table-level constraints that way. Not a practical problem here
+    (nothing in this app writes an invalid created_by), just something
+    to know if this behavior ever seems inconsistent between a fresh
+    clone and an upgraded database.
     """
     cur = conn.cursor()
     cur.execute("PRAGMA table_info(events)")
@@ -80,6 +105,29 @@ def _ensure_events_columns(conn):
         cur.execute("ALTER TABLE events ADD COLUMN tag TEXT")
     if "predicted_turnout" not in existing_columns:
         cur.execute("ALTER TABLE events ADD COLUMN predicted_turnout REAL")
+
+    if "created_by" not in existing_columns:
+        cur.execute("ALTER TABLE events ADD COLUMN created_by INTEGER")
+        conn.commit()
+        # Backfill: every event that existed before ownership was added
+        # gets attributed to the Admin account. Admin's pages were never
+        # filtered by owner to begin with (Admin sees everything
+        # regardless), so this doesn't change what Admin sees -- it
+        # just means these older events won't show up under any
+        # Organizer's scoped view, which is the right outcome for
+        # events nobody actually claimed ownership of.
+        #
+        # Note this runs *after* _seed_default_users() in init_db(), so
+        # the Admin account is guaranteed to exist by the time this
+        # looks it up.
+        admin_row = cur.execute(
+            "SELECT user_id FROM users WHERE role = 'admin' ORDER BY user_id LIMIT 1"
+        ).fetchone()
+        if admin_row is not None:
+            cur.execute(
+                "UPDATE events SET created_by = ? WHERE created_by IS NULL",
+                (admin_row["user_id"],),
+            )
 
     conn.commit()
 
@@ -206,7 +254,9 @@ def init_db():
             start_time TEXT,
             end_time TEXT,
             tag TEXT,
-            predicted_turnout REAL
+            predicted_turnout REAL,
+            created_by INTEGER,
+            FOREIGN KEY (created_by) REFERENCES users (user_id)
         )
     """)
 
@@ -268,15 +318,18 @@ def init_db():
 
     conn.commit()
 
+    # Populates the users table with demo accounts the first time it's
+    # empty. This has to happen *before* _ensure_events_columns() below,
+    # since that function looks up the Admin account's user_id to
+    # backfill created_by on any pre-existing events -- see
+    # _seed_default_users() above for why this runs automatically
+    # rather than needing a manual seeding step.
+    _seed_default_users(conn)
+
     # Handles the case where events/guests/reviews already existed before this update.
     _ensure_events_columns(conn)
     _ensure_guests_columns(conn)
     _ensure_reviews_columns(conn)
-
-    # Populates the users table with demo accounts the first time it's
-    # empty -- see _seed_default_users() above for why this runs
-    # automatically rather than needing a manual seeding step.
-    _seed_default_users(conn)
 
     conn.close()
 
@@ -304,22 +357,23 @@ def get_user_by_username(username):
 # Events
 # ---------------------------------------------------------------------
 
-def add_event(event_name, event_date, start_time, end_time, tag):
+def add_event(event_name, event_date, start_time, end_time, tag, created_by):
     """
     Insert a new event.
     event_date: ISO string, e.g. '2026-09-20'
     start_time / end_time: 24-hour string, e.g. '18:30'
-    tag: one of the fixed event categories (see TAG_OPTIONS in
-        admin_events.py), e.g. 'Movie'
+    tag: one of the fixed event categories (see TAG_OPTIONS above)
+    created_by: user_id of whoever created it (Admin or Organizer) --
+        used to scope an Organizer's pages to just their own events.
     """
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT INTO events (event_name, event_date, start_time, end_time, tag)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO events (event_name, event_date, start_time, end_time, tag, created_by)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (event_name, event_date, start_time, end_time, tag),
+        (event_name, event_date, start_time, end_time, tag, created_by),
     )
     conn.commit()
     event_id = cur.lastrowid
@@ -337,6 +391,26 @@ def get_all_events():
     return rows
 
 
+def get_events_by_owner(owner_id):
+    """
+    Return only the events created_by this user_id, most recent date
+    first -- same shape as get_all_events(), just scoped to one
+    Organizer's own events. This is what organizer_events.py builds
+    its table from, and {e["event_id"] for e in get_events_by_owner(...)}
+    is the set every other Organizer page (Check-In, Guest List,
+    Analytics) filters down to.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM events WHERE created_by = ? ORDER BY event_date DESC",
+        (owner_id,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
 def event_has_registrations(event_id):
     """True if at least one guest has registered for this event."""
     conn = get_connection()
@@ -347,20 +421,53 @@ def event_has_registrations(event_id):
     return count > 0
 
 
-def delete_event(event_id):
+def get_registration_count(event_id):
     """
-    Delete an event, but only if no one has registered for it yet.
-    Deleting an event that already has registrations would leave those
-    registration rows pointing at nothing, which foreign_keys=ON is
-    specifically there to prevent.
+    How many registrations exist for one event. Used by the
+    Organizer's "delete my event" warning, to say exactly how many
+    registrations (and their reviews) a cascade delete is about to
+    remove, rather than a vague "some."
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM registrations WHERE event_id = ?", (event_id,))
+    count = cur.fetchone()[0]
+    conn.close()
+    return count
 
-    Returns True if the event was deleted, False if it was blocked.
+
+def delete_event(event_id, cascade=False):
     """
-    if event_has_registrations(event_id):
+    Delete an event.
+
+    By default (cascade=False) this refuses to delete an event that
+    already has registrations -- deleting it would leave those
+    registration rows (and any reviews tied to them) pointing at
+    nothing, which foreign_keys=ON is specifically there to prevent.
+    This is what Admin's Create Event page uses -- unchanged from
+    before.
+
+    With cascade=True, this deletes the event's reviews and
+    registrations first, then the event itself. This is what the
+    Organizer's own event management uses: "delete my event" is
+    meant to mean everything tied to it goes too, registrations and
+    reviews included, not "block me unless I clean those up by hand
+    first." Reviews are deleted before registrations (matching the
+    child-before-parent order delete_registration() already uses for
+    a single registration) since reviews.event_id is its own foreign
+    key into events, not just a reference via registration_id.
+
+    Returns True if the event was deleted, False if it was blocked
+    (only possible when cascade=False).
+    """
+    if not cascade and event_has_registrations(event_id):
         return False
 
     conn = get_connection()
     cur = conn.cursor()
+    if cascade:
+        cur.execute("DELETE FROM reviews WHERE event_id = ?", (event_id,))
+        cur.execute("DELETE FROM registrations WHERE event_id = ?", (event_id,))
     cur.execute("DELETE FROM events WHERE event_id = ?", (event_id,))
     conn.commit()
     conn.close()

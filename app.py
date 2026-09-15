@@ -34,14 +34,14 @@ admin_manage_page = st.Page("pages/admin_manage.py", title="Manage Guests", icon
 admin_attendance_page = st.Page("pages/admin_attendance.py", title="Check-In", icon="🎟️")
 admin_analytics_page = st.Page("pages/admin_analytics.py", title="Analytics", icon="📊")
 admin_tools_page = st.Page("pages/admin_tools.py", title="Data Tools", icon="🧹")
-organizer_home_page = st.Page("pages/organizer_home.py", title="Organizer Dashboard", icon="🧑‍💼")
+organizer_events_page = st.Page("pages/organizer_events.py", title="Manage My Events", icon="🗓️")
+organizer_checkin_page = st.Page("pages/organizer_checkin.py", title="Check-In", icon="🎟️")
+organizer_guests_page = st.Page("pages/organizer_guests.py", title="Guest List", icon="🗂️")
+organizer_analytics_page = st.Page("pages/organizer_analytics.py", title="My Analytics", icon="📊")
 register_page = st.Page("pages/register.py", title="Register", icon="📝")
 review_page = st.Page("pages/review.py", title="Leave a Review", icon="💬")
 
-# Which pages each role gets in their sidebar menu. Organizer only has
-# a placeholder page for now -- real event-scoped views (their own
-# events, check-in, analytics) are the next step in the v2 plan, once
-# event ownership exists in the data model.
+# Which pages each role gets in their sidebar menu.
 role_pages = {
     "admin": [
         admin_events_page,
@@ -51,7 +51,10 @@ role_pages = {
         admin_tools_page,
     ],
     "organizer": [
-        organizer_home_page,
+        organizer_events_page,
+        organizer_checkin_page,
+        organizer_guests_page,
+        organizer_analytics_page,
     ],
     "guest": [
         register_page,

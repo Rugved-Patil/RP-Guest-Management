@@ -6,17 +6,11 @@ Admin-facing page: create, view, and delete events.
 
 import streamlit as st
 from datetime import date, time
-from utils.db import init_db, add_event, get_all_events, delete_event
+from utils.db import init_db, add_event, get_all_events, delete_event, TAG_OPTIONS
 from utils.auth import require_role
 
 init_db()
 require_role("admin")
-
-# Fixed set of event categories. Also used as a feature by the
-# no-show and turnout-forecasting models in utils/ml.py, so adding a
-# new tag here means it'll show up as a new one-hot column for both --
-# not just a UI-level change.
-TAG_OPTIONS = ["Movie", "Play", "Sports", "Dance"]
 
 st.title("Create Event")
 
@@ -56,6 +50,7 @@ with st.form("create_event_form", clear_on_submit=True):
                 start_time.strftime("%H:%M"),
                 end_time.strftime("%H:%M"),
                 tag,
+                created_by=st.session_state.user_id,
             )
             st.success(f"Event '{event_name}' created.")
 
