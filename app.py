@@ -62,7 +62,8 @@ organizer_events_page = st.Page("pages/organizer_events.py", title="Manage My Ev
 organizer_checkin_page = st.Page("pages/organizer_checkin.py", title="Check-In", icon="🎟️")
 organizer_guests_page = st.Page("pages/organizer_guests.py", title="Guest List", icon="🗂️")
 organizer_analytics_page = st.Page("pages/organizer_analytics.py", title="My Analytics", icon="📊")
-register_page = st.Page("pages/register.py", title="Register", icon="📝")
+guest_events_page = st.Page("pages/guest_events.py", title="My Events", icon="🎟️")
+guest_profile_page = st.Page("pages/guest_profile.py", title="My Profile", icon="👤")
 review_page = st.Page("pages/review.py", title="Leave a Review", icon="💬")
 
 # Which pages each role gets in their sidebar menu.
@@ -81,7 +82,8 @@ role_pages = {
         organizer_analytics_page,
     ],
     "guest": [
-        register_page,
+        guest_events_page,
+        guest_profile_page,
         review_page,
     ],
 }

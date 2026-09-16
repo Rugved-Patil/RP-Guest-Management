@@ -1,4 +1,7 @@
 """
+Trashed Page (Not in Use any more)
+Kept only Temporaryly
+
 pages/register.py
 -------------------
 Guest-facing page: book a spot at an event.
@@ -13,7 +16,6 @@ created, since other pages (Manage Guests, Analytics) need to see past
 ones too. A guest who's already registered for the event they pick is
 stopped before a second registration gets created; see
 has_registration() in utils/db.py.
-"""
 
 import streamlit as st
 from datetime import date
@@ -78,3 +80,4 @@ with st.form("register_form"):
                 st.success("You're registered! Save your ticket code below.")
                 st.metric("Your ticket code", ticket_code)
                 st.caption("You'll need this code for check-in at the event.")
+"""

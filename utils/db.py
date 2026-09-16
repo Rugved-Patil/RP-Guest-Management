@@ -7,7 +7,7 @@ We're using SQLite -- a single-file database (no separate server to run).
 Python's built-in `sqlite3` module talks to it directly, so no extra
 install is needed for the database itself.
 
-Every other page (register.py, admin_events.py, etc.) should import
+Every other page (guest_events.py, admin_events.py, etc.) should import
 functions from this file rather than writing SQL directly -- that way
 if the schema changes later, there's only one place to update.
 """
@@ -152,11 +152,12 @@ def _ensure_reviews_columns(conn):
 def _ensure_guests_columns(conn):
     """
     Migration helper: if the guests table already existed from before
-    possible_duplicate_of/duplicate_match_score were added, add the
-    missing columns onto it instead of silently ignoring them. Same
+    possible_duplicate_of/duplicate_match_score/user_id were added, add
+    the missing columns onto it instead of silently ignoring them. Same
     idea as _ensure_events_columns above --
     added as nullable, so existing guest rows just get an empty value
-    (meaning "not flagged"), which is exactly what we want for them.
+    (meaning "not flagged" / "not linked to a login account"), which is
+    exactly what we want for them.
     """
     cur = conn.cursor()
     cur.execute("PRAGMA table_info(guests)")
@@ -168,6 +169,35 @@ def _ensure_guests_columns(conn):
         cur.execute("ALTER TABLE guests ADD COLUMN duplicate_match_score REAL")
     if "segment" not in existing_columns:
         cur.execute("ALTER TABLE guests ADD COLUMN segment TEXT")
+
+    if "user_id" not in existing_columns:
+        cur.execute("ALTER TABLE guests ADD COLUMN user_id INTEGER")
+        conn.commit()
+        # Backfill: link each pre-existing guest row to its matching
+        # login account, using the same stable "username@example.com"
+        # convention seed_sample_data() uses to build the sample guest
+        # pool (see there for why). This is what makes guest
+        # self-service work immediately on an upgraded database --
+        # without it, someone logging in as guest14 today would see an
+        # empty "My Events" page even though guest14's sample
+        # registrations already exist, just not yet linked to their
+        # login account.
+        #
+        # Only matches guests that don't already have a user_id, so
+        # running this twice (e.g. a column added by hand, then this
+        # runs again on the next start) never overwrites a real link.
+        # Note this runs *after* _seed_default_users() in init_db(), so
+        # every guest login account is guaranteed to exist by the time
+        # this looks them up.
+        guest_accounts = cur.execute(
+            "SELECT user_id, username FROM users WHERE role = 'guest'"
+        ).fetchall()
+        for account in guest_accounts:
+            derived_email = f"{account['username']}@example.com"
+            cur.execute(
+                "UPDATE guests SET user_id = ? WHERE email = ? AND user_id IS NULL",
+                (account["user_id"], derived_email),
+            )
 
     conn.commit()
 
@@ -242,7 +272,9 @@ def init_db():
             phone TEXT,
             possible_duplicate_of INTEGER,
             duplicate_match_score REAL,
-            segment TEXT
+            segment TEXT,
+            user_id INTEGER,
+            FOREIGN KEY (user_id) REFERENCES users (user_id)
         )
     """)
 
@@ -561,6 +593,67 @@ def update_guest(guest_id, name, email, phone):
     conn.close()
 
 
+def get_guest_by_user_id(user_id):
+    """
+    Look up the guest profile linked to a Guest login account, via the
+    guests.user_id column. Returns None if this account hasn't
+    registered/created a profile yet -- pages/guest_events.py and
+    pages/guest_profile.py both use that None case to show a "set up
+    your profile first" prompt instead of a guest record.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM guests WHERE user_id = ?", (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+def link_guest_to_user(guest_id, user_id):
+    """
+    Stamp a guest row with the login account it belongs to. Only
+    called once per guest -- see get_or_create_guest_for_user() below,
+    which is the only place that calls this.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE guests SET user_id = ? WHERE guest_id = ?",
+        (user_id, guest_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_or_create_guest_for_user(user_id, name, email, phone):
+    """
+    The self-service version of get_or_create_guest(): first checks
+    whether this login account already has a linked guest profile
+    (get_guest_by_user_id) and returns that guest_id immediately if
+    so, ignoring the name/email/phone arguments entirely -- once
+    someone has a profile, pages/guest_events.py never asks them to
+    re-type their details just to register for another event.
+
+    Only the first time this account is used (its very first
+    registration, or filling in "My Profile" for the first time) does
+    this fall through to get_or_create_guest()'s normal exact-email /
+    fuzzy-duplicate logic, and then link whatever guest row that
+    returns to this user_id so every later call short-circuits above.
+
+    Also used by seed_sample_data() for the 25 pre-loaded guest
+    accounts, so sample registrations show up under "My Events" the
+    moment someone logs in, without needing the migration backfill in
+    _ensure_guests_columns() to have run first.
+    """
+    existing = get_guest_by_user_id(user_id)
+    if existing is not None:
+        return existing["guest_id"]
+
+    guest_id = get_or_create_guest(name, email, phone)
+    link_guest_to_user(guest_id, user_id)
+    return guest_id
+
+
 def _normalize_name_for_matching(name):
     """
     Lowercase a name and sort its words alphabetically.
@@ -635,10 +728,11 @@ def get_or_create_guest(name, email, phone):
     flags the new guest as a possible duplicate; failing that, it's
     just a normal new guest.
 
-    This is exactly what register.py needs, and it's also what the
-    sample-data seeder needs (see seed_sample_data() below) -- pulling
-    it out here means both call one function instead of the same
-    three-way logic being copy-pasted in two places.
+    This is exactly what get_or_create_guest_for_user() falls back on
+    for a logged-in guest's first-ever registration, and it's also
+    what the sample-data seeder needs (see seed_sample_data() below) --
+    pulling it out here means both call one function instead of the
+    same three-way logic being copy-pasted in two places.
 
     Returns the resulting guest_id either way.
     """
@@ -877,7 +971,8 @@ def add_registration(guest_id, event_id, attendance_status="registered",
     attendance_status / checked_in_at / registered_at are optional and
     only matter for the sample-data seeder below -- a real guest
     registering through the form always gets the defaults (registered
-    now, not checked in yet), so register.py doesn't need to change.
+    now, not checked in yet), so guest_events.py's register flow just
+    calls this the same way the old anonymous form did.
     """
     conn = get_connection()
     cur = conn.cursor()
@@ -936,6 +1031,40 @@ def get_registration_by_ticket(ticket_code):
     row = cur.fetchone()
     conn.close()
     return row
+
+
+def get_registrations_by_guest(guest_id):
+    """
+    Return every registration belonging to one guest, joined with that
+    event's details -- most recent event date first. This is what
+    pages/guest_events.py builds "My registrations" from, and what it
+    checks against to keep already-registered events out of the
+    "browse & register" list below it.
+
+    Scoped via SQL (WHERE guest_id = ?) rather than fetching every
+    registration system-wide and filtering in Python, since this is a
+    guest-facing page and there's no reason to pull other guests' rows
+    just to throw them away.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+            r.registration_id, r.ticket_code, r.attendance_status,
+            r.registered_at, r.checked_in_at,
+            e.event_id, e.event_name, e.event_date,
+            e.start_time, e.end_time, e.tag
+        FROM registrations r
+        JOIN events e ON e.event_id = r.event_id
+        WHERE r.guest_id = ?
+        ORDER BY e.event_date DESC
+        """,
+        (guest_id,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return rows
 
 
 def delete_registration(registration_id):
@@ -1600,6 +1729,15 @@ def seed_sample_data():
     # fuzzy duplicate-detection still has something to catch -- the 25
     # fixed accounts alone can't provide that, since their names never
     # change between runs.
+    #
+    # get_or_create_guest_for_user() (rather than plain
+    # get_or_create_guest()) is what links each of these 25 guest rows
+    # to its matching login account's user_id as it's created -- so
+    # sample registrations show up under "My Events" the first time
+    # someone logs in as, say, guest14, with no separate linking step
+    # needed. It's also idempotent: re-running this (e.g. after a data
+    # reset) finds each account's already-linked guest row via
+    # user_id and reuses it, rather than creating a duplicate.
     guest_login_accounts = get_users_by_role("guest")
     guest_ids = []
     generated_names = []
@@ -1607,7 +1745,9 @@ def seed_sample_data():
     for account in guest_login_accounts:
         email = f"{account['username']}@example.com"
         phone = f"9{random.randint(100000000, 999999999)}"
-        guest_id = get_or_create_guest(account["display_name"], email, phone)
+        guest_id = get_or_create_guest_for_user(
+            account["user_id"], account["display_name"], email, phone
+        )
         guest_ids.append(guest_id)
         generated_names.append(account["display_name"])
         added["guests"] += 1
