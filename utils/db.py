@@ -1003,9 +1003,14 @@ def add_registration(guest_id, event_id, attendance_status="registered",
 def get_registration_by_ticket(ticket_code):
     """
     Look up a single registration by its ticket code, joined with the
-    guest's name and the event's name/date -- everything review.py
-    needs to identify who's reviewing what, in one query instead of
-    three separate lookups.
+    guest's name and the event's name/date -- everything the check-in
+    pages (admin_attendance.py, organizer_checkin.py) need to identify
+    who's checking in, in one query instead of three separate lookups.
+
+    review.py used to rely on this too, back when a guest typed their
+    ticket code to identify themselves for a review. It now looks
+    guests up via their logged-in account (get_guest_by_user_id() +
+    get_registrations_by_guest()) instead, so this is check-in-only now.
 
     Returns a row with columns: registration_id, guest_id, event_id,
     ticket_code, attendance_status, checked_in_at, guest_name,

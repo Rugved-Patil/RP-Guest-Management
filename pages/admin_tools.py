@@ -123,6 +123,10 @@ bypass_enabled = st.checkbox(
 set_bypass_setting(bypass_enabled)
 
 if bypass_enabled:
-    st.caption("⚠️ Bypass is ON -- any ticket code can leave a review right now.")
+    st.caption(
+        "⚠️ Bypass is ON -- any guest can review any event they're "
+        "registered for right now, regardless of attendance status "
+        "or whether the event has happened yet."
+    )
 else:
     st.caption("Bypass is OFF -- normal attended + event-over rule applies.")

@@ -17,8 +17,10 @@ Flow:
    with a one-click "Register" (no form fields -- we already know who
    they are).
 3. My registrations: every event they ARE registered for, with their
-   ticket code (this doubles as their check-in code, and later their
-   review-page identity -- unchanged from before).
+   ticket code (this doubles as their check-in code at the door).
+   Leaving a review no longer needs this code -- pages/review.py now
+   looks up the guest's own attended, not-yet-reviewed events directly
+   from their logged-in account instead.
 4. Cancel: only offered for registrations still in "registered" status
    -- once a guest has been checked in (attended) or the event's
    passed them by (no_show), that's history, not something to cancel.
@@ -100,10 +102,7 @@ else:
                 ticket_code = add_registration(guest_id, event_id)
                 st.success("You're registered! Save your ticket code below.")
                 st.metric("Your ticket code", ticket_code)
-                st.caption(
-                    "You'll need this code for check-in at the event, and "
-                    "again afterward to leave a review."
-                )
+                st.caption("You'll need this code for check-in at the event.")
 
 st.divider()
 
@@ -131,8 +130,9 @@ else:
         })
     st.dataframe(display_rows, use_container_width=True)
     st.caption(
-        "Your ticket code doubles as your check-in code at the door, "
-        "and later unlocks the review form for events you attended."
+        "Your ticket code doubles as your check-in code at the door. "
+        "Once you've attended and the event's over, head to Leave a "
+        "Review to share feedback -- no code needed there."
     )
 
     # --- Cancel a registration -----------------------------------------

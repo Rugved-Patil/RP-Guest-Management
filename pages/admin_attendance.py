@@ -20,7 +20,7 @@ require_role("admin")
 st.title("Check-In")
 st.write("Enter the guest's ticket code and check them in.")
 
-# Unlike register.py/review.py, this form uses clear_on_submit=True --
+# Unlike the review form (pages/review.py), this one uses clear_on_submit=True --
 # check-in happens over and over in a row for a stream of guests at
 # the door, so clearing the box after each one lets the organizer go
 # straight into typing the next code without deleting the old one by
