@@ -1,32 +1,35 @@
 # RP-Guest-Management
 
-A Streamlit dashboard for managing guests across recurring events, built to practice applying machine learning to a real, structured workflow instead of a toy dataset. It covers the full lifecycle of an event: registration, ticketing, check-in, and post-event feedback, and layers in a handful of ML features on top: clustering, prediction, sentiment analysis, and forecasting.
+A Streamlit dashboard for managing guests across recurring events, built to practice applying machine learning to a real, structured workflow instead of a toy dataset. It covers the full lifecycle of an event -- creation, ticketed registration, check-in, and post-event feedback -- behind a role-based login, and layers in a handful of ML features on top: clustering, prediction, sentiment analysis, and forecasting.
+
+For the full feature scope, data model, and what's explicitly out of scope, see [`RP-Guest_Management_Scope.md`](./RP-Guest_Management_Scope.md). This README is the shorter "how do I run this" version.
 
 ## What it does
 
-An organizer creates an event. A guest registers and gets a unique ticket code on screen. At the door, the organizer types that code in to check the guest in. Afterward, guests who actually showed up can leave a review, and that review gets scored for sentiment automatically. All of it rolls up into an analytics page that also predicts no-shows before the event, groups guests into loyalty tiers, flags likely duplicate profiles, and forecasts how many people will actually turn up to upcoming events.
+Three roles share one app: **Admin** has full, unscoped access to everything; **Organizer** gets the same day-to-day tools (create events, check guests in, view guests, see analytics) scoped to only the events they created; **Guest** logs in to browse and register for events, manage their own registrations, and leave reviews -- no typing in codes or re-entering their details every time.
 
 Flow, step by step:
 
-1. Organizer creates an event
-2. Guest registers and receives a ticket code
-3. The new registration gets checked against existing guests for possible duplicates
+1. An Organizer (or Admin) creates an event
+2. A logged-in Guest registers with one click from **My Events** and receives a unique ticket code on screen
+3. The registration gets checked against existing guest profiles for possible duplicates
 4. A model flags guests who are likely to no-show
-5. Organizer can search, view, and edit guests and registrations any time
-6. At the event, the organizer types in the guest's code to check them in
-7. Guests who attended can leave a review afterward
-8. That review gets scored for sentiment
-9. Everything feeds into the analytics dashboard
+5. Admin/Organizer can search, view, and edit guests and registrations at any time
+6. At the door, the ticket code is typed in to check the guest in
+7. Once a guest is marked attended and the event is over, **Leave a Review** shows it in their dropdown of reviewable events
+8. That review gets scored for sentiment automatically
+9. Everything feeds into the analytics dashboard -- system-wide for Admin, scoped to their own events for Organizer
 
 ## Features
 
 Core stuff:
-- Event creation
-- Guest registration with generated ticket codes
-- Admin search, view, and edit for guests and registrations
-- Check-in by typing a ticket code
-- Post-event reviews, only available to guests who actually attended
-- Fuzzy duplicate guest detection, with merge and dismiss options
+- Login with role-based navigation (Admin / Organizer / Guest)
+- Event creation, owned by whoever created it (`events.created_by`)
+- Guest self-service: browse open events, one-click register, view/cancel registrations, edit profile -- all tied to the logged-in account
+- Admin: full search, view, and edit for every guest and registration; Organizer: read-only guest list scoped to their own events
+- Check-in by typing a ticket code (Admin: any event; Organizer: their own events only)
+- Post-event reviews: a logged-in guest picks from their own attended, not-yet-reviewed events in a dropdown -- no code to type
+- Fuzzy duplicate guest detection, with merge and dismiss options (Admin-only)
 
 ML/DS features:
 - Sentiment analysis on reviews, using DistilBERT (`distilbert-base-uncased-finetuned-sst-2-english`)
@@ -37,28 +40,34 @@ ML/DS features:
 
 ## Tech stack
 
-Streamlit for the UI (native `st.Page` and `st.navigation`), SQLite for storage, scikit-learn for modeling, HuggingFace Transformers for sentiment, Prophet for forecasting, and Plotly for charts.
+Streamlit for the UI (native `st.Page` and `st.navigation`), SQLite for storage, scikit-learn for modeling, HuggingFace Transformers for sentiment, Prophet for forecasting, and Plotly for charts. Pinned ML dependency versions: `transformers==5.16.1`, `torch==2.14.0`, `plotly==7.0.0`, `scikit-learn==1.9.0`, `prophet==1.4.0`.
 
 ## Project structure
 
 ```
 RP-Guest-Management/
-├── app.py                    # entry point: login gate + role-based navigation
+├── app.py                       # entry point: login gate + role-based navigation
 ├── pages/
-│   ├── admin_events.py       # admin: create events
-│   ├── admin_manage.py       # admin: view/search/edit guests, duplicate merge/dismiss
-│   ├── admin_attendance.py   # admin: ticket check-in
-│   ├── admin_analytics.py    # admin: sentiment, no-show, segmentation, forecasting
-│   ├── admin_tools.py        # admin: sample data seeder and reset
-│   ├── organizer_home.py     # organizer: placeholder (real views coming next)
-│   ├── register.py           # guest facing: registration form
-│   └── review.py             # guest facing: post-event review form
+│   ├── admin_events.py          # admin: create events
+│   ├── admin_manage.py          # admin: view/search/edit guests, duplicate merge/dismiss
+│   ├── admin_attendance.py      # admin: ticket check-in
+│   ├── admin_analytics.py       # admin: sentiment, no-show, segmentation, forecasting (system-wide)
+│   ├── admin_tools.py           # admin: sample data seeder, reset, review-eligibility testing bypass
+│   ├── organizer_events.py      # organizer: manage my events (create/edit/delete, own events only)
+│   ├── organizer_checkin.py     # organizer: ticket check-in, guarded to own events
+│   ├── organizer_guests.py      # organizer: read-only guest list, scoped to own events
+│   ├── organizer_analytics.py   # organizer: same analytics as admin, scoped to own events
+│   ├── guest_events.py          # guest: browse/register/cancel, view ticket codes ("My Events")
+│   ├── guest_profile.py         # guest: create-once/edit-anytime profile ("My Profile")
+│   └── review.py                # guest: pick an attended, not-yet-reviewed event and leave feedback
 ├── data/
-│   └── guest_dashboard.db    # SQLite database
+│   └── guest_dashboard.db       # SQLite database, ships pre-seeded
 ├── utils/
-│   ├── db.py                 # all data-access functions
-│   ├── auth.py                # login/session helpers, role-gating
-│   └── ml.py                 # clustering, prediction, sentiment, forecasting logic
+│   ├── db.py                    # all data-access functions, schema, migrations
+│   ├── auth.py                  # login/session helpers, role-gating
+│   ├── ml.py                    # clustering, prediction, sentiment, forecasting logic
+│   └── analytics_sections.py    # shared chart/table rendering, reused by admin + organizer analytics
+├── RP-Guest_Management_Scope.md # full project scope: features, data model, out-of-scope
 └── requirements.txt
 ```
 
@@ -66,7 +75,7 @@ RP-Guest-Management/
 
 ## Login
 
-Three roles: **Admin** (full access), **Organizer** (placeholder for now -- scoped event views are next), and **Guest** (Register/Review pages). Accounts are pre-loaded into the database automatically the first time the app runs -- there's no signup form. Every account shares the same demo password.
+Three roles, 33 pre-loaded accounts total: **Admin** (full access), **Organizer** (scoped event management -- create, check in, view guests, analytics, all limited to events they created), and **Guest** (browse/register/cancel events, manage their profile, leave reviews). Accounts are pre-loaded into the database automatically the first time the app runs -- there's no signup form. Every account shares the same demo password.
 
 | Role | Username | Password |
 |---|---|---|
@@ -79,11 +88,11 @@ This is plain-text, shared-password auth, which is fine for a local demo but not
 ## Data model
 
 Five linked SQLite tables:
-- **Guests**: persistent guest profiles, reused across events
-- **Events**: one row per event
+- **Users**: login accounts for the role system (`user_id`, `username`, `password`, `role`, `display_name`)
+- **Guests**: persistent guest profiles, reused across events -- `user_id` optionally links a guest record to the login account that owns it
+- **Events**: one row per event, `created_by` links it to the Admin/Organizer account that created it
 - **Registrations**: links a guest to a specific event, holds the ticket code, check-in time, attendance status, and no-show prediction
-- **Reviews**: tied to a specific registration, only exists for guests marked attended
-- **Users**: login accounts for the role system (Admin / Organizer / Guest)
+- **Reviews**: tied to a specific guest + event pair, only reachable once that registration is marked attended and the event is over (or the Data Tools testing bypass is on)
 
 ## Setup
 
@@ -104,7 +113,7 @@ Five linked SQLite tables:
    streamlit run app.py
    ```
 
-The database gets created and migrated automatically the first time you run the app. If you'd rather not enter everything by hand, the Data Tools page has a sample data seeder that fills it with realistic demo data.
+The database gets created and migrated automatically the first time you run the app. If you'd rather not enter everything by hand, log in as `admin` and use the Data Tools page's sample data seeder to fill it with realistic demo data.
 
 ## Known limitations
 
@@ -119,4 +128,6 @@ A few things are left out on purpose, not things that got missed:
 
 ## Roadmap
 
-Login shell and role-gated navigation (Admin / Organizer / Guest) are in place. Next up: event ownership (`events.created_by`) and real Organizer views scoped to their own events, then turning guest registration into a logged-in, self-service flow (browse/register/cancel), then QR-based check-in.
+Done: login shell with role-gated navigation, event ownership with scoped Organizer views, and a fully self-service Guest experience (browse/register/cancel, profile management, and picking events to review by logged-in identity instead of typing a ticket code).
+
+Next up: QR-based check-in (the last deferred v1 item, planned for whenever it's picked up next). A GitHub Release on top of the `v1.0.0` tag is also still sitting there, ready to publish any time.
