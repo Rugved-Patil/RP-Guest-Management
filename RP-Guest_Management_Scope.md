@@ -14,7 +14,7 @@ Every page is reachable only by the role(s) it's built for, both by what `app.py
 |---|---|---|
 | **Admin** | Create events, view/search/edit every guest and registration, resolve flagged duplicates, check guests in, view analytics, seed/reset sample data, toggle the review-eligibility testing bypass | System-wide -- every event, every guest |
 | **Organizer** | Create/edit/delete events, check guests in, view a read-only guest list, view analytics | Scoped to events they personally created (`events.created_by`) |
-| **Guest** | Browse and register for events, cancel their own registrations, edit their profile, leave reviews | Scoped to their own account (`guests.user_id`) |
+| **Guest** | Browse and register for events, cancel their own registrations, edit their profile, view a registration's QR code, leave reviews | Scoped to their own account (`guests.user_id`) |
 
 33 accounts are pre-loaded automatically on first run: 1 Admin, 7 Organizers, 25 Guests, all sharing one demo password. There's no signup flow -- see Out of Scope.
 
@@ -26,7 +26,7 @@ Every page is reachable only by the role(s) it's built for, both by what `app.py
 4. **Duplicate Check** — New guest profiles are checked (fuzzy match, via `difflib`) against existing records to avoid duplicate profiles; Admin reviews and resolves any flagged pairs.
 5. **No-Show Prediction** — Before the event, a model flags guests likely not to show up, using registration + guest history data.
 6. **Admin/Organizer Management** — Admin can view, search, and edit any guest/registration; Organizer sees the same for their own events (read-only guest list).
-7. **Check-In** — At the door, the ticket code is typed into a check-in screen (Admin or Organizer, matching who owns the event); the system validates it and marks that registration attended, with a timestamp.
+7. **Check-In** — At the door, the ticket code is typed into a check-in screen or read from a photo of the guest's QR code (Admin or Organizer, matching who owns the event); either way, the system validates it and marks that registration attended, with a timestamp.
 8. **Post-Event Review** — Once a registration is marked attended and the event date has passed, that event shows up in the guest's **Leave a Review** dropdown. The guest picks it, rates it, and writes feedback -- no code to type, since they're already logged in. A guest's own reviews never show up twice; an already-reviewed event drops off the list immediately.
 9. **Sentiment Analysis** — Review text is run through a HuggingFace sentiment classifier.
 10. **Summary & Analytics** — Sentiment trends, attendance rates, and guest segments are summarized on the analytics dashboard -- system-wide for Admin, scoped to owned events for Organizer.
@@ -46,9 +46,12 @@ A logged-in guest browses upcoming events not yet registered for, registers in o
 Admin: full table of every guest/registration with sorting, filtering, search, and edit/delete. Organizer: the same view, filtered to their own events, read-only (editing and duplicate resolution stay Admin-only, since a guest record is shared across every organizer's events).
 
 ### 4.5 Ticket Check-In
-Admin or Organizer types a guest's ticket code at the event; the system looks it up, validates it, and marks that registration attended. Organizer's version is additionally guarded to only accept codes for events they created.
+Admin or Organizer gets a guest's ticket code either of two ways -- typed in directly, or read automatically from a photo of the guest's QR code (`st.camera_input()` + OpenCV's QR decoder) -- and both feed the same lookup/validation/mark-attended logic. Organizer's version is additionally guarded to only accept codes (typed or scanned) for events they created. Typing stays available as a fallback since a scan can fail on a blurry photo or a dim phone screen.
 
-### 4.6 Post-Event Review
+### 4.6 Guest QR Codes ("My Tickets")
+A guest picks any of their own registrations from a dropdown and sees that registration's ticket code rendered as a QR code (plus the code as plain text underneath, for reading aloud or typing by hand if a scan doesn't work). Generated on the fly from the existing ticket code -- no new data, nothing stored beyond what registration already holds.
+
+### 4.7 Post-Event Review
 A guest picks one of their own attended, not-yet-reviewed events from a dropdown and submits a 1-5 rating plus free-text feedback. An Admin-only testing bypass (Data Tools page) can widen this to "any event you're registered for," skipping the attended/event-over check, for testing without a real checked-in guest on hand.
 
 ## 5. Data Model
@@ -96,13 +99,15 @@ Cross-event charts: attendance rate over time (with and without the forecast lin
 | Forecasting | Prophet |
 | Visualization | Plotly |
 | Fuzzy Matching | `difflib` (standard library) |
+| QR Generation | `qrcode` |
+| QR Decoding | `opencv-python-headless` (`cv2.QRCodeDetector`) |
 
 ## 8. Out of Scope
 
 - User self-registration/signup -- accounts are pre-loaded only
 - Real authentication -- passwords are plain text and shared per role; fine for a local demo, not for production
-- Automated email or QR delivery -- ticket codes are shown on screen and shared manually
-- Camera-based QR scanning at check-in -- typed-code validation only; a planned future addition, the data model already supports it with no rework needed
+- Automated email or QR delivery -- ticket codes and QR codes are shown on screen and shared manually
+- Live, continuous QR scanning (like a checkout scanner) -- check-in reads one photo at a time (`st.camera_input()`); a continuous live-video scanner would need a heavier component (e.g. `streamlit-webrtc`) and isn't planned unless the snapshot flow proves clunky in practice
 - Payment or booking system integration
 - Mobile app version
 - Real-time notifications
@@ -110,4 +115,4 @@ Cross-event charts: attendance rate over time (with and without the forecast lin
 
 ## 9. Status
 
-All three v2 phases -- login/roles, scoped Organizer views, and self-service Guest registration/profile/review -- are complete. Deferred for later: QR-based check-in, and a GitHub Release on the `v1.0.0` tag.
+All three v2 phases -- login/roles, scoped Organizer views, and self-service Guest registration/profile/review -- are complete, plus a post-v2 polish pass (login-based reviews) and QR check-in (guest-facing QR display on My Tickets, plus a Scan QR option alongside typed-code check-in for Admin and Organizer). Deferred for later: a GitHub Release on the `v1.0.0` tag.

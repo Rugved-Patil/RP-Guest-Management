@@ -57,13 +57,14 @@ admin_events_page = st.Page("pages/admin_events.py", title="Create Event", icon=
 admin_manage_page = st.Page("pages/admin_manage.py", title="Manage Guests", icon="🗂️")
 admin_attendance_page = st.Page("pages/admin_attendance.py", title="Check-In", icon="🎟️")
 admin_analytics_page = st.Page("pages/admin_analytics.py", title="Analytics", icon="📊")
-admin_tools_page = st.Page("pages/admin_tools.py", title="Data Tools", icon="🧹")
+admin_tools_page = st.Page("pages/admin_tools.py", title="Admin Tools", icon="🧹")
 organizer_events_page = st.Page("pages/organizer_events.py", title="Manage My Events", icon="🗓️")
 organizer_checkin_page = st.Page("pages/organizer_checkin.py", title="Check-In", icon="🎟️")
 organizer_guests_page = st.Page("pages/organizer_guests.py", title="Guest List", icon="🗂️")
 organizer_analytics_page = st.Page("pages/organizer_analytics.py", title="My Analytics", icon="📊")
 guest_events_page = st.Page("pages/guest_events.py", title="My Events", icon="🎟️")
 guest_profile_page = st.Page("pages/guest_profile.py", title="My Profile", icon="👤")
+guest_tickets_page = st.Page("pages/guest_tickets.py", title="My Tickets", icon="🎫")
 review_page = st.Page("pages/review.py", title="Leave a Review", icon="💬")
 
 # Which pages each role gets in their sidebar menu.
@@ -84,6 +85,7 @@ role_pages = {
     "guest": [
         guest_events_page,
         guest_profile_page,
+        guest_tickets_page,
         review_page,
     ],
 }

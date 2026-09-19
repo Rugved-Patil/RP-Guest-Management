@@ -27,7 +27,8 @@ Core stuff:
 - Event creation, owned by whoever created it (`events.created_by`)
 - Guest self-service: browse open events, one-click register, view/cancel registrations, edit profile -- all tied to the logged-in account
 - Admin: full search, view, and edit for every guest and registration; Organizer: read-only guest list scoped to their own events
-- Check-in by typing a ticket code (Admin: any event; Organizer: their own events only)
+- Check-in by typing a ticket code, or by photographing the guest's QR code (Admin: any event; Organizer: their own events only) -- both feed the same validation, so typing always works as a fallback if a scan doesn't
+- Guests can view/show their QR code anytime on **My Tickets**, per registration
 - Post-event reviews: a logged-in guest picks from their own attended, not-yet-reviewed events in a dropdown -- no code to type
 - Fuzzy duplicate guest detection, with merge and dismiss options (Admin-only)
 
@@ -40,7 +41,7 @@ ML/DS features:
 
 ## Tech stack
 
-Streamlit for the UI (native `st.Page` and `st.navigation`), SQLite for storage, scikit-learn for modeling, HuggingFace Transformers for sentiment, Prophet for forecasting, and Plotly for charts. Pinned ML dependency versions: `transformers==5.16.1`, `torch==2.14.0`, `plotly==7.0.0`, `scikit-learn==1.9.0`, `prophet==1.4.0`.
+Streamlit for the UI (native `st.Page` and `st.navigation`), SQLite for storage, scikit-learn for modeling, HuggingFace Transformers for sentiment, Prophet for forecasting, Plotly for charts, `qrcode` for generating ticket QR codes, and `opencv-python-headless` for reading them back out of a photo. Pinned versions: `transformers==5.16.1`, `torch==2.14.0`, `plotly==7.0.0`, `scikit-learn==1.9.0`, `prophet==1.4.0`, `qrcode==8.2`, `opencv-python-headless==4.13.0.92`.
 
 ## Project structure
 
@@ -50,15 +51,16 @@ RP-Guest-Management/
 ├── pages/
 │   ├── admin_events.py          # admin: create events
 │   ├── admin_manage.py          # admin: view/search/edit guests, duplicate merge/dismiss
-│   ├── admin_attendance.py      # admin: ticket check-in
+│   ├── admin_attendance.py      # admin: ticket check-in -- type a code, or scan a QR photo
 │   ├── admin_analytics.py       # admin: sentiment, no-show, segmentation, forecasting (system-wide)
 │   ├── admin_tools.py           # admin: sample data seeder, reset, review-eligibility testing bypass
 │   ├── organizer_events.py      # organizer: manage my events (create/edit/delete, own events only)
-│   ├── organizer_checkin.py     # organizer: ticket check-in, guarded to own events
+│   ├── organizer_checkin.py     # organizer: ticket check-in (type or scan), guarded to own events
 │   ├── organizer_guests.py      # organizer: read-only guest list, scoped to own events
 │   ├── organizer_analytics.py   # organizer: same analytics as admin, scoped to own events
 │   ├── guest_events.py          # guest: browse/register/cancel, view ticket codes ("My Events")
 │   ├── guest_profile.py         # guest: create-once/edit-anytime profile ("My Profile")
+│   ├── guest_tickets.py         # guest: view a registration's ticket as a QR code ("My Tickets")
 │   └── review.py                # guest: pick an attended, not-yet-reviewed event and leave feedback
 ├── data/
 │   └── guest_dashboard.db       # SQLite database, ships pre-seeded
@@ -66,7 +68,8 @@ RP-Guest-Management/
 │   ├── db.py                    # all data-access functions, schema, migrations
 │   ├── auth.py                  # login/session helpers, role-gating
 │   ├── ml.py                    # clustering, prediction, sentiment, forecasting logic
-│   └── analytics_sections.py    # shared chart/table rendering, reused by admin + organizer analytics
+│   ├── analytics_sections.py    # shared chart/table rendering, reused by admin + organizer analytics
+│   └── qr.py                    # generate a ticket's QR code, and decode one back from a photo
 ├── RP-Guest_Management_Scope.md # full project scope: features, data model, out-of-scope
 └── requirements.txt
 ```
@@ -115,6 +118,8 @@ Five linked SQLite tables:
 
 The database gets created and migrated automatically the first time you run the app. If you'd rather not enter everything by hand, log in as `admin` and use the Data Tools page's sample data seeder to fill it with realistic demo data.
 
+The **Scan QR** tab on Check-In uses your browser's webcam, which browsers only allow over HTTPS or on `localhost` -- running locally with `streamlit run app.py` is fine (localhost counts), but this would need HTTPS if it were ever deployed elsewhere over plain HTTP. Your browser will prompt for camera permission the first time you open that tab.
+
 ## Known limitations
 
 A few things are left out on purpose, not things that got missed:
@@ -122,12 +127,12 @@ A few things are left out on purpose, not things that got missed:
 - No signup flow -- accounts are pre-loaded only, matching the v2 plan's "pre-loaded accounts, no self-registration" decision
 - Role-gating relies on which pages get handed to `st.navigation()` for the current role, plus a same-purpose check at the top of each page (see `require_role()` in `utils/auth.py`) -- not real security, just enough to keep each role looking at the right thing in a local demo
 - No automated email or QR delivery, ticket codes are shown on screen and shared manually
-- Check-in is typed-code only, no camera-based QR scanning
+- QR scanning is snapshot-based (`st.camera_input()` -- one photo per click, decoded automatically), not a continuous live scanner like a checkout scanner; typing a code stays available as a fallback if a scan doesn't read
 - No payment or booking integration
 - The no-show model trains and gets evaluated on the same data, with no train/test split. That's a deliberate simplification for a small demo dataset, not meant to be a rigorous evaluation.
 
 ## Roadmap
 
-Done: login shell with role-gated navigation, event ownership with scoped Organizer views, and a fully self-service Guest experience (browse/register/cancel, profile management, and picking events to review by logged-in identity instead of typing a ticket code).
+Done: login shell with role-gated navigation, event ownership with scoped Organizer views, a fully self-service Guest experience (browse/register/cancel, profile management, and picking events to review by logged-in identity instead of typing a ticket code), and snapshot-based QR check-in alongside the original typed-code flow.
 
-Next up: QR-based check-in (the last deferred v1 item, planned for whenever it's picked up next). A GitHub Release on top of the `v1.0.0` tag is also still sitting there, ready to publish any time.
+Next up: whenever convenient, a GitHub Release on top of the `v1.0.0` tag is still sitting there, ready to publish. A live continuous-scan check-in (rather than photo-per-click) is a possible future upgrade if the snapshot flow ever feels clunky in practice, but isn't planned yet.
